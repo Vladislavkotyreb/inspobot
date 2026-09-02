@@ -1,0 +1,16 @@
+[Unit]
+Description=inspobot — Telegram-бот с собственным расписанием
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=inspobot
+WorkingDirectory=/opt/inspobot
+ExecStart=/opt/inspobot/.venv/bin/python -m inspobot.bot
+EnvironmentFile=/opt/inspobot/.env
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

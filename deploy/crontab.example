@@ -1,0 +1,12 @@
+# Вариант 1: подборка по системному cron (демон не нужен).
+# Время сервера может отличаться от московского — проверьте `timedatectl`.
+# Если сервер живёт в UTC, 11:00 МСК это 08:00 UTC.
+#
+#   crontab -e
+#
+# m  h  dom mon dow  команда
+  0  11  *   *   *   cd /home/USER/inspobot && .venv/bin/python -m inspobot.daily >> var/cron.log 2>&1
+
+# Повторный запуск в тот же день ничего не отправит (защита в базе),
+# поэтому подстраховочную строку добавлять безопасно:
+  0  14  *   *   *   cd /home/USER/inspobot && .venv/bin/python -m inspobot.daily >> var/cron.log 2>&1

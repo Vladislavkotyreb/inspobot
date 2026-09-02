@@ -1,0 +1,13 @@
+[Unit]
+Description=Запускать inspobot каждый день в 11:00 по Москве
+
+[Timer]
+# Пояс в строке OnCalendar понимает systemd 252 и новее. На старых версиях
+# уберите «Europe/Moscow» и приведите системное время сервера к нужному поясу
+# (timedatectl set-timezone Europe/Moscow) — иначе таймер сработает по UTC.
+OnCalendar=*-*-* 11:00:00 Europe/Moscow
+Persistent=true
+Unit=inspobot-daily.service
+
+[Install]
+WantedBy=timers.target

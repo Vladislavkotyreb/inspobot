@@ -1,0 +1,13 @@
+[Unit]
+Description=inspobot — утренняя подборка референсов из Mobbin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=inspobot
+WorkingDirectory=/opt/inspobot
+ExecStart=/opt/inspobot/.venv/bin/python -m inspobot.daily
+EnvironmentFile=/opt/inspobot/.env
+StandardOutput=journal
+StandardError=journal
