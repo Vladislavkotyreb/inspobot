@@ -54,6 +54,9 @@ class Telegram:
             raise TelegramError(f"{method}: {payload.get('description', response.status_code)}")
         return payload["result"]
 
+    async def get_me(self) -> dict[str, Any]:
+        return await self._call("getMe", {})
+
     async def send_message(self, text: str, *, chat_id: str | None = None) -> dict[str, Any]:
         return await self._call(
             "sendMessage",

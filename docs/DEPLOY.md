@@ -30,12 +30,31 @@ nano .env
 | Переменная | Где взять |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | [@BotFather](https://t.me/BotFather) → `/newbot` |
-| `TELEGRAM_CHAT_ID` | запустите бота (`.venv/bin/python -m inspobot.bot`), напишите ему `/id` |
+| `TELEGRAM_CHAT_ID` | напишите боту любое сообщение, затем `inspobot.doctor` покажет id |
 | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) → API keys |
 
 Токен Mobbin получается отдельно — см. [MOBBIN_AUTH.md](MOBBIN_AUTH.md).
 
 ## 3. Проверка до расписания
+
+Сначала доступы — команда проверяет их по отдельности, поэтому сразу видно,
+что именно чинить:
+
+```bash
+.venv/bin/python -m inspobot.doctor
+```
+
+```
+✓ Telegram: бот @your_bot (id 1234567890)
+! chat_id: не задан. Подходит: 123456789 (private, Влад)
+✓ Anthropic: модель доступна: claude-opus-5
+✓ Mobbin: токен есть, обновляется сам (осталось 58 мин)
+```
+
+Допишите `TELEGRAM_CHAT_ID` в `.env` и прогоните ещё раз — теперь всё зелёное.
+`--send-test` дополнительно напишет в чат.
+
+Дальше сама подборка:
 
 ```bash
 .venv/bin/python -m inspobot.daily --dry-run --verbose   # в консоль, без отправки
@@ -106,7 +125,7 @@ sudo systemctl restart inspobot-bot   # если работает демоном
 
 | Симптом | Куда смотреть |
 |---|---|
-| Утром ничего не пришло | `var/cron.log` или `journalctl -u inspobot-daily` |
+| Утром ничего не пришло | `inspobot.doctor`, затем `var/cron.log` или `journalctl -u inspobot-daily` |
 | «Нет файла с токенами Mobbin» | [MOBBIN_AUTH.md](MOBBIN_AUTH.md) |
 | Пришёл текст без картинок | Telegram не смог забрать превью; ссылки на Mobbin в сообщениях остаются рабочими |
 | «Подборка на … уже уходила» | нормальное поведение; для повтора `--force` |

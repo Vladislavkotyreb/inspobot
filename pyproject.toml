@@ -12,6 +12,7 @@ dependencies = [
 inspobot-daily = "inspobot.daily:main"
 inspobot-bot = "inspobot.bot:main"
 inspobot-auth = "inspobot.auth_cli:main"
+inspobot-doctor = "inspobot.doctor:main"
 
 [build-system]
 requires = ["setuptools>=68"]

@@ -30,10 +30,11 @@ git clone https://github.com/Vladislavkotyreb/inspobot
 cd inspobot
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-cp .env.example .env && nano .env      # токен бота, chat_id, ключ Anthropic
+cp .env.example .env && nano .env      # токен бота, ключ Anthropic
 .venv/bin/python -m inspobot.auth_cli  # один раз: вход в Mobbin через браузер
 
-.venv/bin/python -m inspobot.daily --dry-run   # посмотреть в консоли
+.venv/bin/python -m inspobot.doctor            # все ли доступы на месте
+.venv/bin/python -m inspobot.daily --dry-run   # посмотреть подборку в консоли
 .venv/bin/python -m inspobot.daily --force     # отправить в чат
 ```
 
@@ -53,6 +54,10 @@ cp .env.example .env && nano .env      # токен бота, chat_id, ключ 
 | `/id` | id текущего чата — нужен при первичной настройке |
 | `/help` | справка |
 
+Отдельно от бота, из консоли: `python -m inspobot.doctor` — проверяет токен
+Telegram, ключ Anthropic и токен Mobbin по отдельности и подсказывает `chat_id`,
+если он ещё не задан. С `--send-test` ещё и пишет в чат.
+
 Если расписание живёт в cron, демон не нужен — но и команд тогда нет.
 
 ## Требования
@@ -70,9 +75,10 @@ cp .env.example .env && nano .env      # токен бота, chat_id, ключ 
 ./run-checks.sh
 ```
 
-40 тестов: ротация тем, разбор и валидация ответа модели, форматирование под
-лимиты Telegram, дедупликация в SQLite, форма запроса к Messages API и вся
-оркестровка с подменёнными Claude и Telegram. Ключи и сеть не нужны.
+54 теста: ротация тем, разбор и валидация ответа модели, форматирование под
+лимиты Telegram, дедупликация в SQLite, форма запроса к Messages API,
+самопроверка доступов и вся оркестровка с подменёнными Claude и Telegram.
+Ключи и сеть не нужны.
 
 **Что не проверено:** живых запросов к Mobbin, Anthropic и Telegram не было —
 у автора кода не было ни ваших ключей, ни доступа к mobbin.com. Первый реальный
