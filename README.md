@@ -38,8 +38,14 @@ cp .env.example .env && nano .env      # токен бота, ключ Anthropic
 .venv/bin/python -m inspobot.daily --force     # отправить в чат
 ```
 
-Дальше — расписание: строка в cron, systemd-таймер или демон со своим
-таймером внутри. Все три варианта в [docs/DEPLOY.md](docs/DEPLOY.md).
+Дальше — расписание. На своём Маке хватит одной команды:
+
+```bash
+./deploy/install-macos.sh
+```
+
+На сервере — строка в cron, systemd-таймер или демон со своим таймером внутри.
+Все варианты в [docs/DEPLOY.md](docs/DEPLOY.md).
 
 Про вход в Mobbin (почему OAuth, а не ключ) — [docs/MOBBIN_AUTH.md](docs/MOBBIN_AUTH.md).
 
