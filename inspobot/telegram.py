@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -112,3 +113,45 @@ class Telegram:
         if not payload.get("ok"):
             raise TelegramError(f"getUpdates: {payload.get('description')}")
         return list(payload["result"])
+
+    async def send_message_with_keyboard(
+        self, text: str, keyboard: dict[str, Any], *, chat_id: str | None = None
+    ) -> dict[str, Any]:
+        return await self._call(
+            "sendMessage",
+            {
+                "chat_id": chat_id or self.chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": "true",
+                "reply_markup": json.dumps(keyboard),
+            },
+        )
+
+    async def edit_message(
+        self, chat_id: str, message_id: int, text: str, keyboard: dict[str, Any] | None = None
+    ) -> None:
+        data = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        }
+        if keyboard is not None:
+            data["reply_markup"] = json.dumps(keyboard)
+        try:
+            await self._call("editMessageText", data)
+        except TelegramError as exc:
+            # «message is not modified» — обычное дело при двойном нажатии.
+            if "not modified" not in str(exc):
+                raise
+
+    async def answer_callback(self, callback_id: str, text: str = "") -> None:
+        try:
+            await self._call(
+                "answerCallbackQuery", {"callback_query_id": callback_id, "text": text}
+            )
+        except TelegramError as exc:
+            # Просроченный запрос отвечать уже некому — не повод падать.
+            log.info("answerCallbackQuery: %s", exc)

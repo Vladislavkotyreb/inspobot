@@ -8,6 +8,7 @@ Claude сам подключается к удалённому MCP-сервер�
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 from typing import Any, Sequence
@@ -16,14 +17,17 @@ import anthropic
 
 from .client import make_client
 from .config import Config
-from .models import Digest
+from .models import Digest, Pick
 from .prompt import (
     DIGEST_SCHEMA,
     SYSTEM_PROMPT,
     CuratorError,
     build_messages,
+    build_selection_messages,
     parse_digest,
+    parse_picks,
 )
+from .wizard import Selection, api_platform, topic_of
 from .topics import Topic
 
 MCP_BETA = "mcp-client-2025-11-20"
@@ -117,3 +121,40 @@ def collect(
     return parse_digest(
         _final_text(message), day, mobile, desktop, set(ios_seen) | set(web_seen)
     )
+
+
+def collect_selection(
+    config: Config,
+    selection: Selection,
+    mobbin_token: str,
+    count: int = 5,
+    seen: Sequence[str] = (),
+) -> tuple[str, tuple[Pick, ...]]:
+    """Подбор по атрибутам, выбранным в мастере. Возвращает (итог, находки)."""
+    topic = topic_of(selection)
+    if topic is None:
+        raise CuratorError("Выбор не заполнен до конца.")
+
+    messages = build_selection_messages(
+        kind=selection.kind,
+        platform=api_platform(selection),
+        query=topic.query,
+        title=topic.title,
+        count=count,
+        seen=seen if selection.kind == "s" else (),
+    )
+    client = make_client(config)
+    message = _run(client, build_request(config, mobbin_token), messages)
+    log.info(
+        "Подбор %s: вход %s, выход %s",
+        selection,
+        getattr(message.usage, "input_tokens", "?"),
+        getattr(message.usage, "output_tokens", "?"),
+    )
+
+    try:
+        data = json.loads(_final_text(message))
+    except json.JSONDecodeError as exc:
+        raise CuratorError(f"Ответ модели — не JSON: {exc}") from exc
+    picks = parse_picks(data, selection.kind, set(seen))
+    return str(data.get("summary", "")).strip(), picks
