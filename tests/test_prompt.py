@@ -9,10 +9,23 @@ from inspobot.prompt import (
     parse_digest,
     search_limit,
 )
-from inspobot.profile import DEFAULT_PROFILE, Slot, plan_for_day
+from inspobot.profile import Day, Schedule, Slot, plan_for_day
 
-DAY = date(2026, 9, 10)
-PLAN = plan_for_day(DEFAULT_PROFILE, DAY)
+DAY = date(2026, 9, 14)  # понедельник
+SCHEDULE = Schedule(
+    days=(
+        Day(
+            "Тестовый день",
+            (
+                Slot("s", "i", "c", count=3),
+                Slot("s", "w", "b", count=3),
+                Slot("f", "i", "c", count=2),
+            ),
+        ),
+    )
+    + (None,) * 6
+)
+PLAN = plan_for_day(SCHEDULE, DAY)[1]
 UUID_A = "ed0c23e4-d2c7-428f-bf9c-d6efd38d7f47"
 UUID_B = "2051c35c-fef5-4bd9-b8ad-a00c38ff9189"
 
@@ -46,7 +59,7 @@ class BuildMessagesTest(unittest.TestCase):
 
     def test_tool_matches_the_kind(self):
         plan = (
-            (Slot("s", "i", "c"), DEFAULT_PROFILE.slots[0].rotation()[0]),
+            (Slot("s", "i", "c"), Slot("s", "i", "c").rotation()[0]),
             (Slot("f", "w", "b"), Slot("f", "w", "b").rotation()[0]),
             (Slot("w", "", "b"), Slot("w", "", "b").rotation()[0]),
         )

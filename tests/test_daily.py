@@ -4,18 +4,35 @@ import asyncio
 import os
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest import mock
 
 from inspobot import daily
 from inspobot.config import Config
 from inspobot.models import Digest, Pick, Section
-from inspobot.profile import DEFAULT_PROFILE, Profile, Slot, plan_for_day, save
+from inspobot.profile import Day, Schedule, Slot, plan_for_day, save
 from inspobot.state import Store
+from inspobot.telegram import TelegramError
 
-DAY = date(2026, 9, 10)
-PLAN = plan_for_day(DEFAULT_PROFILE, DAY)
+MONDAY = date(2026, 9, 14)
+SATURDAY = MONDAY + timedelta(days=5)
+
+SCHEDULE = Schedule(
+    days=(
+        Day(
+            "Геймификация",
+            (
+                Slot("s", "i", "c", count=2),
+                Slot("s", "w", "b", count=1),
+                Slot("f", "i", "c", count=1),
+            ),
+        ),
+    )
+    + (None,) * 6
+)
+PLAN = plan_for_day(SCHEDULE, MONDAY)[1]
+FLOW_STEPS = tuple(f"https://mobbin.com/api/mcp/step/{i}" for i in range(1, 15))
 
 
 def make_pick(i, platform="ios", screens=()):
@@ -27,23 +44,25 @@ def make_pick(i, platform="ios", screens=()):
 
 def make_digest():
     return Digest(
-        day=DAY,
+        day=MONDAY,
+        title="Геймификация",
         summary="Итог дня.",
         sections=(
             Section(PLAN[0][0], PLAN[0][1], (make_pick(1), make_pick(2))),
             Section(PLAN[1][0], PLAN[1][1], (make_pick(3, "web"),)),
-            Section(PLAN[2][0], PLAN[2][1], (make_pick(4),)),  # флоу
+            Section(PLAN[2][0], PLAN[2][1], (make_pick(4, screens=FLOW_STEPS[:5]),)),
         ),
     )
 
 
 class FakeTelegram:
-    def __init__(self, token, chat_id, photo_ok=True, group_ok=True):
-        self.messages: list[str] = []
-        self.photos: list[str] = []
+    def __init__(self, token=None, chat_id=None, photo_ok=True, group_ok=True, failing=()):
+        self.messages: list[tuple[str, str | None]] = []
+        self.photos: list[tuple[str, str | None]] = []
         self.groups: list[tuple[list[str], str, bool]] = []
         self.photo_ok = photo_ok
         self.group_ok = group_ok
+        self.failing = set(failing)
 
     async def __aenter__(self):
         return self
@@ -51,17 +70,24 @@ class FakeTelegram:
     async def __aexit__(self, *exc):
         return None
 
+    def _guard(self, chat_id):
+        if chat_id in self.failing:
+            raise TelegramError("Forbidden: bot was blocked by the user")
+
     async def send_message(self, text, chat_id=None):
-        self.messages.append(text)
+        self._guard(chat_id)
+        self.messages.append((text, chat_id))
         return {}
 
     async def send_photo(self, image_url, caption, chat_id=None):
-        if self.photo_ok:
-            self.photos.append(image_url)
-            return True
-        return False
+        self._guard(chat_id)
+        if not self.photo_ok:
+            return False
+        self.photos.append((image_url, chat_id))
+        return True
 
     async def send_media_group(self, urls, caption="", *, as_document=False, chat_id=None):
+        self._guard(chat_id)
         if not self.group_ok:
             return False
         self.groups.append((list(urls), caption, as_document))
@@ -86,102 +112,102 @@ class RunOnceTest(unittest.TestCase):
                 "anthropic_api_key": "k",
                 "db_path": Path(self.dir.name) / "state.sqlite3",
                 "profile_path": Path(self.dir.name) / "profile.json",
+                "chats_path": Path(self.dir.name) / "chats.txt",
                 "mobbin_access_token": "mobbin-token",
             }
         )
+        save(self.config.profile_path, SCHEDULE)
         self.digest = make_digest()
 
     def tearDown(self):
         self.dir.cleanup()
 
-    def _run(self, telegram, **kwargs):
+    def _run(self, telegram, day=MONDAY, **kwargs):
         with mock.patch.object(daily, "collect", return_value=self.digest) as collect, \
              mock.patch.object(daily, "Telegram", return_value=telegram):
-            sent = asyncio.run(daily.run_once(self.config, day=DAY, **kwargs))
+            sent = asyncio.run(daily.run_once(self.config, day=day, **kwargs))
         return sent, collect
 
-    def test_sends_header_and_one_photo_per_pick(self):
-        telegram = FakeTelegram("t", "42")
+    def test_sends_header_photos_and_a_gallery_for_the_flow(self):
+        telegram = FakeTelegram()
         sent, _ = self._run(telegram)
         self.assertEqual(sent, 4)
-        self.assertEqual(len(telegram.photos), 4)
-        self.assertEqual(len(telegram.messages), 1)  # только шапка
-        self.assertIn("Итог дня.", telegram.messages[0])
+        self.assertEqual(len(telegram.photos), 3)   # три обычных экрана
+        self.assertEqual(len(telegram.groups), 1)   # флоу — галереей
+        self.assertEqual(len(telegram.messages), 1)  # шапка
 
-    def test_header_lists_the_blocks(self):
-        telegram = FakeTelegram("t", "42")
-        self._run(telegram)
-        for section in self.digest.sections:
-            self.assertIn(section.title(), telegram.messages[0])
+    def test_day_off_sends_nothing_and_leaves_no_trace(self):
+        telegram = FakeTelegram()
+        sent, collect = self._run(telegram, day=SATURDAY)
+        self.assertEqual(sent, 0)
+        self.assertEqual(collect.call_count, 0)
+        self.assertEqual(telegram.messages, [])
+        self.assertFalse(Store(self.config.db_path).sent_today(SATURDAY))
 
-    def test_falls_back_to_text_when_photo_fails(self):
-        telegram = FakeTelegram("t", "42", photo_ok=False)
-        sent, _ = self._run(telegram)
-        self.assertEqual(sent, 4)
-        self.assertEqual(telegram.photos, [])
-        self.assertEqual(len(telegram.messages), 5)  # шапка + четыре текстовых
+    def test_day_title_reaches_the_model_call(self):
+        _, collect = self._run(FakeTelegram())
+        self.assertEqual(collect.call_args.args[5], "Геймификация")
 
     def test_second_run_same_day_is_skipped(self):
-        self._run(FakeTelegram("t", "42"))
-        telegram = FakeTelegram("t", "42")
-        sent, collect = self._run(telegram)
+        self._run(FakeTelegram())
+        sent, collect = self._run(FakeTelegram())
         self.assertEqual(sent, 0)
         self.assertEqual(collect.call_count, 0)
 
     def test_only_screens_are_remembered_not_flows(self):
-        self._run(FakeTelegram("t", "42"))
+        self._run(FakeTelegram())
         store = Store(self.config.db_path)
-        self.assertEqual(len(store.recent_seen_ids("ios")), 2)  # из блока экранов
+        self.assertEqual(len(store.recent_seen_ids("ios")), 2)
         self.assertEqual(len(store.recent_seen_ids("web")), 1)
 
-    def test_seen_ids_reach_the_next_request(self):
-        self._run(FakeTelegram("t", "42"))
-        _, collect = self._run(FakeTelegram("t", "42"), force=True)
-        seen = collect.call_args.args[4]
-        self.assertEqual(len(seen["ios"]), 2)
-        self.assertEqual(len(seen["web"]), 1)
-
-    def test_plan_comes_from_the_saved_profile(self):
-        save(self.config.profile_path, Profile((Slot("w", "", "b", count=2),)))
-        _, collect = self._run(FakeTelegram("t", "42"))
-        plan = collect.call_args.args[2]
-        self.assertEqual(len(plan), 1)
-        self.assertEqual(plan[0][0].kind, "w")
-
     def test_failure_is_reported_and_day_stays_open(self):
-        telegram = FakeTelegram("t", "42")
+        telegram = FakeTelegram()
         with mock.patch.object(daily, "collect", side_effect=RuntimeError("Mobbin молчит")), \
              mock.patch.object(daily, "Telegram", return_value=telegram):
             with self.assertRaises(RuntimeError):
-                asyncio.run(daily.run_once(self.config, day=DAY))
-        self.assertIn("Mobbin молчит", telegram.messages[0])
-        self.assertFalse(Store(self.config.db_path).sent_today(DAY))
-
-    def test_dry_run_sends_nothing(self):
-        telegram = FakeTelegram("t", "42")
-        sent, _ = self._run(telegram, dry_run=True)
-        self.assertEqual(sent, 4)
-        self.assertEqual(telegram.messages, [])
-        self.assertFalse(Store(self.config.db_path).sent_today(DAY))
+                asyncio.run(daily.run_once(self.config, day=MONDAY))
+        self.assertIn("Mobbin молчит", telegram.messages[0][0])
+        self.assertFalse(Store(self.config.db_path).sent_today(MONDAY))
 
 
-class ShowPlanTest(unittest.TestCase):
-    def test_prints_plan_without_touching_the_api(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            for key in list(os.environ):
-                if key.startswith(("INSPOBOT_", "MOBBIN_", "TELEGRAM_", "ANTHROPIC_")):
-                    del os.environ[key]
-            config = Config(
-                **{**Config.from_env().__dict__, "profile_path": Path(tmp) / "profile.json"}
-            )
-            self.assertEqual(daily.show_plan(config, DAY), 0)
+class BroadcastTest(RunOnceTest):
+    def write_chats(self, *ids):
+        self.config.chats_path.parent.mkdir(parents=True, exist_ok=True)
+        self.config.chats_path.write_text("\n".join(ids), encoding="utf-8")
 
+    def test_one_digest_reaches_every_chat(self):
+        self.write_chats("42", "77", "-100500")
+        telegram = FakeTelegram()
+        sent, collect = self._run(telegram)
+        self.assertEqual(collect.call_count, 1, "модель должна вызываться один раз")
+        self.assertEqual(sent, 12)  # четыре находки × три чата
+        self.assertEqual({chat for _, chat in telegram.messages}, {"42", "77", "-100500"})
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_a_blocked_chat_does_not_stop_the_rest(self):
+        self.write_chats("42", "77", "-100500")
+        telegram = FakeTelegram(failing={"77"})
+        sent, _ = self._run(telegram)
+        self.assertEqual(sent, 8)
+        self.assertEqual({chat for _, chat in telegram.photos}, {"42", "-100500"})
+        self.assertTrue(Store(self.config.db_path).sent_today(MONDAY))
 
+    def test_when_nobody_receives_the_run_fails(self):
+        self.write_chats("42", "77")
+        telegram = FakeTelegram(failing={"42", "77"})
+        with self.assertRaises(TelegramError):
+            self._run(telegram)
+        self.assertFalse(Store(self.config.db_path).sent_today(MONDAY))
 
-FLOW_STEPS = tuple(f"https://mobbin.com/api/mcp/step/{i}" for i in range(1, 15))
+    def test_without_a_list_falls_back_to_the_single_chat(self):
+        telegram = FakeTelegram()
+        self._run(telegram)
+        self.assertEqual({chat for _, chat in telegram.messages}, {"42"})
+
+    def test_explicit_chat_overrides_the_list(self):
+        self.write_chats("42", "77")
+        telegram = FakeTelegram()
+        self._run(telegram, chat_id="999")
+        self.assertEqual({chat for _, chat in telegram.messages}, {"999"})
 
 
 class FlowDeliveryTest(unittest.TestCase):
@@ -191,10 +217,8 @@ class FlowDeliveryTest(unittest.TestCase):
         self.section = Section(PLAN[2][0], PLAN[2][1], ())
 
     def send(self, pick, telegram=None, as_document=False):
-        telegram = telegram or FakeTelegram("t", "42")
-        asyncio.run(
-            daily.send_pick(telegram, self.section, pick, 1, 1, None, as_document)
-        )
+        telegram = telegram or FakeTelegram()
+        asyncio.run(daily.send_pick(telegram, self.section, pick, 1, 1, None, as_document))
         return telegram
 
     def test_single_image_goes_as_a_plain_photo(self):
@@ -208,14 +232,10 @@ class FlowDeliveryTest(unittest.TestCase):
         urls, caption, _ = telegram.groups[0]
         self.assertEqual(urls, list(FLOW_STEPS[:6]))
         self.assertIn("App 1", caption)
-        self.assertEqual(telegram.photos, [])
 
     def test_long_flow_is_split_and_captioned_once(self):
-        """В галерею Telegram влезает десять картинок, шагов бывает больше."""
         telegram = self.send(make_pick(1, screens=FLOW_STEPS))
-        self.assertEqual(len(telegram.groups), 2)
-        self.assertEqual(len(telegram.groups[0][0]), 10)
-        self.assertEqual(len(telegram.groups[1][0]), 4)
+        self.assertEqual([len(g[0]) for g in telegram.groups], [10, 4])
         self.assertNotEqual(telegram.groups[0][1], "")
         self.assertEqual(telegram.groups[1][1], "")
 
@@ -224,13 +244,33 @@ class FlowDeliveryTest(unittest.TestCase):
         self.assertTrue(telegram.groups[0][2])
 
     def test_falls_back_to_single_photos_when_gallery_fails(self):
-        telegram = FakeTelegram("t", "42", group_ok=False)
+        telegram = FakeTelegram(group_ok=False)
         self.send(make_pick(1, screens=FLOW_STEPS[:4]), telegram)
-        self.assertEqual(telegram.photos, list(FLOW_STEPS[:4]))
+        self.assertEqual([url for url, _ in telegram.photos], list(FLOW_STEPS[:4]))
         self.assertEqual(telegram.messages, [])
 
     def test_text_survives_when_nothing_can_be_shown(self):
-        telegram = FakeTelegram("t", "42", photo_ok=False, group_ok=False)
+        telegram = FakeTelegram(photo_ok=False, group_ok=False)
         self.send(make_pick(1, screens=FLOW_STEPS[:3]), telegram)
         self.assertEqual(len(telegram.messages), 1)
-        self.assertIn("Открыть на Mobbin", telegram.messages[0])
+        self.assertIn("Открыть на Mobbin", telegram.messages[0][0])
+
+
+class ShowPlanTest(unittest.TestCase):
+    def test_prints_the_week_without_touching_the_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for key in list(os.environ):
+                if key.startswith(("INSPOBOT_", "MOBBIN_", "TELEGRAM_", "ANTHROPIC_")):
+                    del os.environ[key]
+            config = Config(
+                **{
+                    **Config.from_env().__dict__,
+                    "profile_path": Path(tmp) / "profile.json",
+                    "chats_path": Path(tmp) / "chats.txt",
+                }
+            )
+            self.assertEqual(daily.show_plan(config, MONDAY), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

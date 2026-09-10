@@ -222,6 +222,7 @@ def parse_digest(
     day: date,
     plan: Sequence[tuple[Slot, Topic]],
     seen: set[str] | None = None,
+    title: str = "",
 ) -> Digest:
     try:
         data = json.loads(raw)
@@ -260,6 +261,7 @@ def parse_digest(
 
     return Digest(
         day=day,
+        title=title,
         summary=str(data.get("summary", "")).strip(),
         sections=sections,
     )

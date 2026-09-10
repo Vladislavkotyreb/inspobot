@@ -85,6 +85,26 @@ SCREENS_B2C = (
           "permission request screen explaining why the app needs access"),
     Topic("settings", "Настройки",
           "settings screen with grouped rows, toggles and a destructive action"),
+    # Геймификация
+    Topic("progress", "Прогресс",
+          "progress screen with a completion ring, milestones and next goal"),
+    Topic("streak", "Стрики",
+          "daily streak screen with a calendar of completed days and a freeze option"),
+    Topic("rewards", "Награды",
+          "achievements screen with earned badges, locked rewards and progress bars"),
+    Topic("challenges", "Челленджи",
+          "challenge screen with a goal, countdown timer and participant progress"),
+    Topic("leaderboard", "Рейтинг",
+          "leaderboard screen with ranked users, own position and league tiers"),
+    Topic("levels", "Уровни и очки",
+          "level up screen with earned points, tier badge and next level requirement"),
+    # Деньги
+    Topic("promo", "Промокоды и скидки",
+          "promo code entry with applied discount and updated total"),
+    Topic("subscription", "Управление подпиской",
+          "manage subscription screen with current plan, renewal date and cancel option"),
+    Topic("trial", "Пробный период",
+          "free trial screen explaining what happens when the trial ends"),
 )
 
 SCREENS_B2B = (
@@ -108,6 +128,17 @@ SCREENS_B2B = (
           "B2B SaaS editor interface with a canvas, layers panel and properties panel"),
     Topic("inbox", "Инбокс",
           "B2B SaaS inbox with a message list, thread view and reply composer"),
+    # Логика сложных процессов
+    Topic("workflow", "Конструктор процессов",
+          "workflow builder with nodes, branching conditions and connections"),
+    Topic("approval", "Согласование",
+          "approval request screen with a chain of approvers and current status"),
+    Topic("automation", "Автоматизации",
+          "automation rule editor with trigger, conditions and actions"),
+    Topic("permissions-matrix", "Матрица прав",
+          "permissions matrix with roles in columns and capabilities in rows"),
+    Topic("audit", "История изменений",
+          "audit log with who changed what and when, with filters"),
 )
 
 FLOWS_B2C = (
@@ -127,6 +158,12 @@ FLOWS_B2C = (
           "booking a slot with date selection, details and confirmation"),
     Topic("kyc", "Верификация",
           "identity verification with document capture and selfie steps"),
+    Topic("gamified-onboarding", "Геймифицированный онбординг",
+          "onboarding with a progress meter, small wins and a first achievement"),
+    Topic("cancel", "Отмена подписки",
+          "cancelling a subscription with retention offers and confirmation"),
+    Topic("upgrade-c", "Переход на платный",
+          "upgrading from free to paid with plan choice and payment"),
 )
 
 FLOWS_B2B = (
@@ -146,6 +183,12 @@ FLOWS_B2B = (
           "importing data from a file with column mapping and validation"),
     Topic("checkout", "Оформление счёта",
           "B2B checkout with billing details, tax information and invoice"),
+    Topic("approval", "Маршрут согласования",
+          "sending a document through an approval chain with comments and sign off"),
+    Topic("automation", "Настройка автоматизации",
+          "building an automation rule from trigger to action with a test run"),
+    Topic("migration", "Перенос данных",
+          "migrating data from another tool with mapping and verification steps"),
 )
 
 SECTIONS_B2C = (

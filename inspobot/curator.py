@@ -102,6 +102,7 @@ def collect(
     plan: Sequence[tuple[Slot, Topic]],
     mobbin_token: str,
     seen_by_platform: dict[str, Sequence[str]] | None = None,
+    title: str = "",
 ) -> Digest:
     """Один запрос к Messages API собирает весь дайджест целиком."""
     client = make_client(config)
@@ -115,4 +116,4 @@ def collect(
     seen: set[str] = set()
     for ids in (seen_by_platform or {}).values():
         seen.update(ids)
-    return parse_digest(_final_text(message), day, plan, seen)
+    return parse_digest(_final_text(message), day, plan, seen, title)

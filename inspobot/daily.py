@@ -18,12 +18,16 @@ import sys
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
+from .catalog import Topic
 from .config import Config
 from .curator import collect
 from .logs import setup as setup_logging
 from .mobbin_auth import get_access_token
 from .models import Digest, Pick, Section
-from .profile import ProfileError, load as load_profile, plan_for_day
+from . import chats as chats_file
+from .profile import WEEKDAY_NAMES, Day, ProfileError, Slot
+from .profile import load as load_schedule
+from .profile import plan_for_day
 from .render import caption_html, header_html
 from .setup_cli import describe
 from .state import SeenScreen, Store
@@ -114,11 +118,17 @@ async def deliver(
     return sent
 
 
-async def build_digest(config: Config, store: Store, day: date) -> Digest:
-    profile = load_profile(config.profile_path)
-    plan = plan_for_day(profile, day)
+async def build_digest(
+    config: Config,
+    store: Store,
+    day: date,
+    day_plan: Day,
+    plan: Sequence[tuple[Slot, Topic]],
+) -> Digest:
     log.info(
-        "План дня: %s",
+        "%s — %s: %s",
+        WEEKDAY_NAMES[day.weekday()],
+        day_plan.title or "без названия",
         "; ".join(f"{slot.title()} → {topic.title}" for slot, topic in plan),
     )
     token = get_access_token(
@@ -128,7 +138,30 @@ async def build_digest(config: Config, store: Store, day: date) -> Digest:
         "ios": store.recent_seen_ids("ios"),
         "web": store.recent_seen_ids("web"),
     }
-    return await asyncio.to_thread(collect, config, day, plan, token, seen_by_platform)
+    return await asyncio.to_thread(
+        collect, config, day, plan, token, seen_by_platform, day_plan.title
+    )
+
+
+def recipients(config: Config, only: str | None = None) -> tuple[str, ...]:
+    if only:
+        return (only,)
+    return chats_file.load(config.chats_path, config.telegram_chat_id)
+
+
+async def broadcast(
+    telegram: Telegram, digest: Digest, targets: Sequence[str], as_document: bool
+) -> tuple[int, list[str]]:
+    """Одна и та же подборка во все чаты. Упавший чат не роняет рассылку."""
+    sent = 0
+    failed: list[str] = []
+    for target in targets:
+        try:
+            sent += await deliver(telegram, digest, chat_id=target, as_document=as_document)
+        except TelegramError as exc:
+            log.warning("Чат %s не получил подборку: %s", target, exc)
+            failed.append(target)
+    return sent, failed
 
 
 async def run_once(
@@ -142,13 +175,19 @@ async def run_once(
     store = Store(config.db_path)
     day = day or today_in(config.timezone)
 
+    planned = plan_for_day(load_schedule(config.profile_path), day)
+    if planned is None:
+        log.info("%s — в этот день письма нет", WEEKDAY_NAMES[day.weekday()])
+        return 0
+    day_plan, plan = planned
+
     if store.sent_today(day) and not force:
         log.info("Подборка на %s уже уходила — пропускаю", day.isoformat())
         return 0
 
     run_id = store.start_run(day)
     try:
-        digest = await build_digest(config, store, day)
+        digest = await build_digest(config, store, day, day_plan, plan)
     except Exception as exc:  # noqa: BLE001 — любой сбой должен попасть в лог и в чат
         store.finish_run(run_id, ok=False, error=repr(exc))
         log.exception("Подборка не собралась")
@@ -171,14 +210,24 @@ async def run_once(
         store.finish_run(run_id, ok=False, picks=len(digest.picks), error="dry-run")
         return len(digest.picks)
 
+    targets = recipients(config, chat_id)
+    if not targets:
+        store.finish_run(run_id, ok=False, error="некому отправлять")
+        raise TelegramError(
+            "Список получателей пуст: заполните TELEGRAM_CHAT_ID или "
+            f"{config.chats_path}"
+        )
+
     async with Telegram(config.telegram_token, config.telegram_chat_id) as tg:
-        try:
-            sent = await deliver(
-                tg, digest, chat_id=chat_id, as_document=config.image_mode == "document"
-            )
-        except TelegramError as exc:
-            store.finish_run(run_id, ok=False, error=repr(exc))
-            raise
+        sent, failed = await broadcast(
+            tg, digest, targets, config.image_mode == "document"
+        )
+        if len(failed) == len(targets):
+            error = f"ни один из {len(targets)} чатов не принял подборку"
+            store.finish_run(run_id, ok=False, error=error)
+            raise TelegramError(error)
+        if failed:
+            log.warning("Не доставлено в %d из %d чатов: %s", len(failed), len(targets), failed)
 
     store.mark_seen(
         [
@@ -193,17 +242,17 @@ async def run_once(
 
 
 def show_plan(config: Config, day: date) -> int:
-    """Что уйдёт сегодня — без запроса к API и без отправки."""
+    """Что уйдёт на неделе — без запроса к API и без отправки."""
     try:
-        profile = load_profile(config.profile_path)
+        schedule = load_schedule(config.profile_path)
     except ProfileError as exc:
-        print(f"Профиль не читается: {exc}", file=sys.stderr)
+        print(f"Расписание не читается: {exc}", file=sys.stderr)
         return 1
-    print(f"Профиль: {config.profile_path}\n")
-    print(describe(profile))
-    print(f"\nТемы на {day.isoformat()}:")
-    for index, (slot, topic) in enumerate(plan_for_day(profile, day), start=1):
-        print(f"  {index}. {slot.title()} → {topic.title} ({slot.count} шт.)")
+
+    targets = recipients(config)
+    print(f"Расписание: {config.profile_path}")
+    print(f"Получателей: {len(targets)}\n")
+    print(describe(schedule, day))
     return 0
 
 

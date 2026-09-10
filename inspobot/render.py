@@ -50,7 +50,10 @@ def section_icon(section: Section) -> str:
 
 
 def header_html(digest: Digest) -> str:
-    lines = [f"<b>Референсы на {escape(human_date(digest.day))}</b>", ""]
+    head = f"Референсы на {escape(human_date(digest.day))}"
+    if digest.title:
+        head += f" — {escape(digest.title)}"
+    lines = [f"<b>{head}</b>", ""]
     for section in digest.sections:
         lines.append(
             f"{section_icon(section)} {escape(section.title())}"

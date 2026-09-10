@@ -2,11 +2,21 @@ import unittest
 from datetime import date
 
 from inspobot.models import Digest, Pick, Section
-from inspobot.profile import DEFAULT_PROFILE, Slot, plan_for_day
+from inspobot.profile import Day as ScheduleDay
+from inspobot.profile import Schedule, Slot, plan_for_day
 from inspobot.render import CAPTION_LIMIT, caption_html, header_html, human_date, section_icon
 
-DAY = date(2026, 9, 10)
-PLAN = plan_for_day(DEFAULT_PROFILE, DAY)
+DAY = date(2026, 9, 14)
+SCHEDULE = Schedule(
+    days=(
+        ScheduleDay(
+            "Геймификация",
+            (Slot("s", "i", "c"), Slot("s", "w", "b"), Slot("f", "i", "c")),
+        ),
+    )
+    + (None,) * 6
+)
+PLAN = plan_for_day(SCHEDULE, DAY)[1]
 
 
 def make_pick(platform="ios", **over):
@@ -28,9 +38,10 @@ def make_section(index=0, picks=None):
     return Section(slot=slot, topic=topic, picks=tuple(picks or [make_pick()]))
 
 
-def make_digest(sections=None, summary="Сегодня про иерархию."):
+def make_digest(sections=None, summary="Сегодня про иерархию.", title="Геймификация"):
     return Digest(
         day=DAY,
+        title=title,
         summary=summary,
         sections=tuple(sections or [make_section(0), make_section(1)]),
     )
@@ -65,7 +76,8 @@ class HeaderTest(unittest.TestCase):
     def test_lists_every_block_with_its_count(self):
         digest = make_digest()
         html = header_html(digest)
-        self.assertIn("10 сентября", html)
+        self.assertIn("14 сентября", html)
+        self.assertIn("Геймификация", html)
         for section in digest.sections:
             self.assertIn(section.title(), html)
         self.assertIn("— 1", html)
@@ -73,6 +85,9 @@ class HeaderTest(unittest.TestCase):
 
     def test_survives_empty_summary(self):
         self.assertNotIn("\n\n\n", header_html(make_digest(summary="")))
+
+    def test_works_without_a_day_title(self):
+        self.assertNotIn(" — ", header_html(make_digest(title="")).splitlines()[0])
 
 
 class CaptionTest(unittest.TestCase):

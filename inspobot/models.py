@@ -45,6 +45,7 @@ class Section:
 @dataclass(frozen=True)
 class Digest:
     day: date
+    title: str
     summary: str
     sections: tuple[Section, ...]
 
