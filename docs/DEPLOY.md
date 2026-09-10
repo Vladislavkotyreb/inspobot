@@ -4,45 +4,82 @@
 `api.mobbin.com` и `api.telegram.org`. Больше ничего: ни базы, ни веб-сервера —
 состояние лежит в файле SQLite.
 
-## 1. Код и зависимости
+## 0. Разведка: годится ли сервер
+
+Прежде чем что-то ставить, проверьте сервер одним скриптом. Он смотрит версию
+Python, доступность трёх нужных хостов, наличие cron и время сервера:
 
 ```bash
 ssh USER@СЕРВЕР
-python3 --version        # нужен 3.11+; SDK anthropic не ставится на 3.9
-git clone https://github.com/Vladislavkotyreb/inspobot /opt/inspobot
-cd /opt/inspobot
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python --version
+curl -fsSLO https://raw.githubusercontent.com/Vladislavkotyreb/inspobot/claude/inspobot-mobbin-msp-v2p3u1/deploy/check-server.sh
+sh check-server.sh
 ```
 
-Если `python3` оказался старым, поставьте новый и соберите окружение им:
-на macOS `brew install python@3.12`, затем
-`"$(brew --prefix)/bin/python3.12" -m venv .venv`; на Debian/Ubuntu
-`apt install python3.12-venv`, затем `python3.12 -m venv .venv`. Признак того,
-что этот шаг пропущен, — `ModuleNotFoundError: No module named 'httpx'`:
-pip не смог поставить anthropic и не поставил вообще ничего.
+Что должно получиться:
 
-На ISPmanager каталог обычно живёт в `/var/www/USER/data/inspobot` — путь
-подставьте свой, дальше по тексту он везде `/opt/inspobot`.
+```
+версия подходит (нужен 3.11+)
+api.anthropic.com      доступен (401)
+api.mobbin.com         доступен (401)
+api.telegram.org       доступен (404)
+```
 
-## 2. Настройки
+(Ссылка ведёт на ветку `claude/inspobot-mobbin-msp-v2p3u1` — сейчас она в
+репозитории единственная и стоит основной. Переименуете её в `main` —
+поправьте адрес.)
+
+Коды `401` и `404` здесь — хороший знак: до хоста дошли, просто без ключа.
+**`НЕДОСТУПЕН` у `api.anthropic.com` означает, что дальше идти незачем** —
+бот на этом сервере работать не будет, сколько его ни настраивай. Это самая
+частая история с российскими хостингами; решается сменой площадки или
+маршрута, но не настройками бота.
+
+`crontab: НЕТ` — не приговор: расписание можно повесить на systemd-таймер
+или на планировщик в панели хостинга.
+
+## 1. Установка
 
 ```bash
-cp .env.example .env
-chmod 600 .env
-nano .env
+git clone https://github.com/Vladislavkotyreb/inspobot ~/inspobot
+cd ~/inspobot
+sh deploy/install-server.sh
 ```
 
-Что заполнить:
+Скрипт найдёт подходящий Python, соберёт окружение, поставит зависимости и
+создаст `.env` из шаблона — после чего остановится и попросит его заполнить.
 
-| Переменная | Где взять |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | [@BotFather](https://t.me/BotFather) → `/newbot` |
-| `TELEGRAM_CHAT_ID` | напишите боту любое сообщение, затем `inspobot.doctor` покажет id |
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) → API keys. Ключ лучше создавать **внутри workspace**: ключ уровня организации API отклоняет, пока не задан `ANTHROPIC_WORKSPACE_ID` |
+## 2. Секреты
 
-Токен Mobbin получается отдельно — см. [MOBBIN_AUTH.md](MOBBIN_AUTH.md).
+```bash
+nano ~/inspobot/.env     # TELEGRAM_BOT_TOKEN и ANTHROPIC_API_KEY
+```
+
+Токен Mobbin **не** получают на сервере: `auth_cli` открывает браузер, которого
+там нет. Скопируйте файл с рабочей машины:
+
+```bash
+# с ноутбука, не с сервера
+scp ~/Desktop/inspobot/var/mobbin_token.json USER@СЕРВЕР:~/inspobot/var/
+```
+
+Заодно перенесите список получателей и расписание, если настраивали их локально:
+
+```bash
+scp ~/Desktop/inspobot/var/chats.txt USER@СЕРВЕР:~/inspobot/var/
+scp ~/Desktop/inspobot/var/profile.json USER@СЕРВЕР:~/inspobot/var/
+```
+
+Базу `inspobot.sqlite3` переносить не обязательно — она нужна только чтобы не
+повторять уже показанные экраны. Перенесёте — память сохранится.
+
+Потом запустите установку ещё раз, теперь она дойдёт до конца:
+
+```bash
+cd ~/inspobot && sh deploy/install-server.sh --cron
+```
+
+Флаг `--cron` сразу добавит строку в расписание. Без него скрипт просто
+напечатает её, чтобы вы вставили сами.
 
 ## 3. Проверка до расписания
 
@@ -84,13 +121,12 @@ nano .env
 
 ### Вариант А — системный cron (проще)
 
-```bash
-crontab -e
-```
+`install-server.sh --cron` делает это сам. Вручную — `crontab -e` и строка из
+[`deploy/crontab.example`](../deploy/crontab.example).
 
-и строка из [`deploy/crontab.example`](../deploy/crontab.example). Проверьте
-пояс сервера: `timedatectl` или `date`. Если сервер в UTC, 11:00 МСК — это
-`0 8 * * *`.
+**Проверьте пояс сервера:** `date`. Скрипт печатает его время, но час в строке
+не пересчитывает — cron не знает про пояса. Если сервер живёт в UTC, 11:00 МСК
+это `0 8 * * *`.
 
 ### Вариант Б — systemd
 
