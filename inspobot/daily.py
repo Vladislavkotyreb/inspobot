@@ -28,7 +28,7 @@ from . import chats as chats_file
 from .profile import WEEKDAY_NAMES, Day, ProfileError, Slot
 from .profile import load as load_schedule
 from .profile import plan_for_day
-from .render import caption_html, header_html
+from .render import caption_html, header_html, pick_keyboard
 from .setup_cli import describe
 from .state import SeenScreen, Store
 from .telegram import MEDIA_GROUP_LIMIT, Telegram, TelegramError
@@ -45,20 +45,15 @@ def _chunks(items: Sequence[str], size: int) -> list[list[str]]:
 
 
 async def _one_by_one(
-    telegram: Telegram, urls: Sequence[str], caption: str, chat_id: str | None
+    telegram: Telegram,
+    urls: Sequence[str],
+    chat_id: str | None,
+    as_document: bool,
 ) -> None:
-    """Запасной путь, когда галерея не ушла: по одной картинке."""
-    caption_delivered = False
+    """Запасной путь, когда галерея не ушла: по одному файлу."""
     for url in urls:
         await telegram.pause()
-        ok = await telegram.send_photo(
-            url, "" if caption_delivered else caption, chat_id=chat_id
-        )
-        if ok and caption and not caption_delivered:
-            caption_delivered = True
-    if caption and not caption_delivered:
-        # Ни одна картинка не дошла — текст со ссылкой всё равно нужен.
-        await telegram.send_message(caption, chat_id=chat_id)
+        await telegram.send_media(url, "", as_document=as_document, chat_id=chat_id)
 
 
 async def send_pick(
@@ -71,26 +66,32 @@ async def send_pick(
     as_document: bool,
 ) -> None:
     caption = caption_html(section, pick, index, total)
+    keyboard = pick_keyboard(pick)
     images = pick.images
 
     if len(images) == 1:
         await telegram.pause()
-        ok = await telegram.send_photo(images[0], caption, chat_id=chat_id)
-        if not ok:
-            # Telegram не забрал превью — тот же текст, но без картинки.
-            await telegram.send_message(caption, chat_id=chat_id)
-        return
-
-    # Флоу: все шаги галереей. В одну влезает десять, длинные сценарии
-    # разбиваются на несколько — подпись идёт только к первой.
-    for number, chunk in enumerate(_chunks(images, MEDIA_GROUP_LIMIT)):
-        await telegram.pause()
-        text = caption if number == 0 else ""
-        ok = await telegram.send_media_group(
-            chunk, text, as_document=as_document, chat_id=chat_id
+        ok = await telegram.send_media(
+            images[0], caption, as_document=as_document, keyboard=keyboard, chat_id=chat_id
         )
         if not ok:
-            await _one_by_one(telegram, chunk, text, chat_id)
+            # Файл не дошёл — текст с кнопкой всё равно нужен.
+            await telegram.send_message(caption, chat_id=chat_id, keyboard=keyboard)
+        return
+
+    # Флоу. Подпись с кнопкой уходит отдельным сообщением перед галереей:
+    # sendMediaGroup не принимает reply_markup, кнопку к нему не прицепить.
+    await telegram.pause()
+    await telegram.send_message(caption, chat_id=chat_id, keyboard=keyboard)
+
+    # Все шаги галереей. В одну влезает десять, длинные сценарии разбиваются.
+    for chunk in _chunks(images, MEDIA_GROUP_LIMIT):
+        await telegram.pause()
+        ok = await telegram.send_media_group(
+            chunk, "", as_document=as_document, chat_id=chat_id
+        )
+        if not ok:
+            await _one_by_one(telegram, chunk, chat_id, as_document)
 
 
 async def send_section(

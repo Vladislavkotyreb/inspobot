@@ -88,7 +88,7 @@ class Config:
                 os.environ.get("INSPOBOT_PROFILE", str(var_dir / "profile.json"))
             ),
             chats_path=Path(os.environ.get("INSPOBOT_CHATS", str(var_dir / "chats.txt"))),
-            image_mode=os.environ.get("INSPOBOT_IMAGE_MODE", "photo").strip().lower(),
+            image_mode=os.environ.get("INSPOBOT_IMAGE_MODE", "document").strip().lower(),
             timezone=os.environ.get("INSPOBOT_TZ", "Europe/Moscow").strip(),
             hour=_int("INSPOBOT_HOUR", 11),
             minute=_int("INSPOBOT_MINUTE", 0),

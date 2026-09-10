@@ -56,13 +56,17 @@ def make_digest():
 
 
 class FakeTelegram:
-    def __init__(self, token=None, chat_id=None, photo_ok=True, group_ok=True, failing=()):
-        self.messages: list[tuple[str, str | None]] = []
-        self.photos: list[tuple[str, str | None]] = []
+    def __init__(self, token=None, chat_id=None, media_ok=True, group_ok=True, failing=()):
+        self.messages: list[tuple[str, str | None, dict | None]] = []
+        self.media: list[tuple[str, str | None, bool, dict | None]] = []
         self.groups: list[tuple[list[str], str, bool]] = []
-        self.photo_ok = photo_ok
+        self.media_ok = media_ok
         self.group_ok = group_ok
         self.failing = set(failing)
+
+    @property
+    def photos(self):
+        return [(url, chat) for url, chat, _, _ in self.media]
 
     async def __aenter__(self):
         return self
@@ -74,16 +78,18 @@ class FakeTelegram:
         if chat_id in self.failing:
             raise TelegramError("Forbidden: bot was blocked by the user")
 
-    async def send_message(self, text, chat_id=None):
+    async def send_message(self, text, chat_id=None, keyboard=None):
         self._guard(chat_id)
-        self.messages.append((text, chat_id))
+        self.messages.append((text, chat_id, keyboard))
         return {}
 
-    async def send_photo(self, image_url, caption, chat_id=None):
+    async def send_media(
+        self, image_url, caption, *, as_document=False, keyboard=None, chat_id=None
+    ):
         self._guard(chat_id)
-        if not self.photo_ok:
+        if not self.media_ok:
             return False
-        self.photos.append((image_url, chat_id))
+        self.media.append((image_url, chat_id, as_document, keyboard))
         return True
 
     async def send_media_group(self, urls, caption="", *, as_document=False, chat_id=None):
@@ -128,13 +134,29 @@ class RunOnceTest(unittest.TestCase):
             sent = asyncio.run(daily.run_once(self.config, day=day, **kwargs))
         return sent, collect
 
-    def test_sends_header_photos_and_a_gallery_for_the_flow(self):
+    def test_sends_header_files_and_a_gallery_for_the_flow(self):
         telegram = FakeTelegram()
         sent, _ = self._run(telegram)
         self.assertEqual(sent, 4)
-        self.assertEqual(len(telegram.photos), 3)   # три обычных экрана
+        self.assertEqual(len(telegram.media), 3)    # три обычных экрана
         self.assertEqual(len(telegram.groups), 1)   # флоу — галереей
-        self.assertEqual(len(telegram.messages), 1)  # шапка
+        # шапка + подпись к флоу: к галерее кнопку прицепить нельзя
+        self.assertEqual(len(telegram.messages), 2)
+
+    def test_screens_go_as_uncompressed_files_with_a_button(self):
+        telegram = FakeTelegram()
+        self._run(telegram)
+        for _, _, as_document, keyboard in telegram.media:
+            self.assertTrue(as_document, "экраны должны уходить файлами, не фото")
+            url = keyboard["inline_keyboard"][0][0]["url"]
+            self.assertTrue(url.startswith("https://mobbin.com/"), url)
+
+    def test_flow_caption_carries_the_button(self):
+        telegram = FakeTelegram()
+        self._run(telegram)
+        _, _, keyboard = telegram.messages[-1]
+        self.assertIsNotNone(keyboard)
+        self.assertEqual(keyboard["inline_keyboard"][0][0]["text"], "Открыть на Mobbin")
 
     def test_day_off_sends_nothing_and_leaves_no_trace(self):
         telegram = FakeTelegram()
@@ -181,7 +203,7 @@ class BroadcastTest(RunOnceTest):
         sent, collect = self._run(telegram)
         self.assertEqual(collect.call_count, 1, "модель должна вызываться один раз")
         self.assertEqual(sent, 12)  # четыре находки × три чата
-        self.assertEqual({chat for _, chat in telegram.messages}, {"42", "77", "-100500"})
+        self.assertEqual({chat for _, chat, _ in telegram.messages}, {"42", "77", "-100500"})
 
     def test_a_blocked_chat_does_not_stop_the_rest(self):
         self.write_chats("42", "77", "-100500")
@@ -201,13 +223,13 @@ class BroadcastTest(RunOnceTest):
     def test_without_a_list_falls_back_to_the_single_chat(self):
         telegram = FakeTelegram()
         self._run(telegram)
-        self.assertEqual({chat for _, chat in telegram.messages}, {"42"})
+        self.assertEqual({chat for _, chat, _ in telegram.messages}, {"42"})
 
     def test_explicit_chat_overrides_the_list(self):
         self.write_chats("42", "77")
         telegram = FakeTelegram()
         self._run(telegram, chat_id="999")
-        self.assertEqual({chat for _, chat in telegram.messages}, {"999"})
+        self.assertEqual({chat for _, chat, _ in telegram.messages}, {"999"})
 
 
 class FlowDeliveryTest(unittest.TestCase):
@@ -221,39 +243,47 @@ class FlowDeliveryTest(unittest.TestCase):
         asyncio.run(daily.send_pick(telegram, self.section, pick, 1, 1, None, as_document))
         return telegram
 
-    def test_single_image_goes_as_a_plain_photo(self):
+    def test_single_image_goes_as_one_file(self):
         telegram = self.send(make_pick(1))
-        self.assertEqual(len(telegram.photos), 1)
+        self.assertEqual(len(telegram.media), 1)
         self.assertEqual(telegram.groups, [])
 
-    def test_flow_steps_go_as_one_gallery(self):
+    def test_flow_steps_go_as_one_gallery_after_the_caption(self):
         telegram = self.send(make_pick(1, screens=FLOW_STEPS[:6]))
         self.assertEqual(len(telegram.groups), 1)
         urls, caption, _ = telegram.groups[0]
         self.assertEqual(urls, list(FLOW_STEPS[:6]))
-        self.assertIn("App 1", caption)
+        self.assertEqual(caption, "", "подпись ушла отдельным сообщением с кнопкой")
+        self.assertIn("App 1", telegram.messages[0][0])
 
-    def test_long_flow_is_split_and_captioned_once(self):
+    def test_long_flow_is_split_into_galleries(self):
         telegram = self.send(make_pick(1, screens=FLOW_STEPS))
         self.assertEqual([len(g[0]) for g in telegram.groups], [10, 4])
-        self.assertNotEqual(telegram.groups[0][1], "")
-        self.assertEqual(telegram.groups[1][1], "")
+        self.assertEqual(len(telegram.messages), 1, "подпись одна на весь сценарий")
 
     def test_document_mode_is_passed_through(self):
         telegram = self.send(make_pick(1, screens=FLOW_STEPS[:3]), as_document=True)
         self.assertTrue(telegram.groups[0][2])
 
-    def test_falls_back_to_single_photos_when_gallery_fails(self):
+    def test_falls_back_to_single_files_when_gallery_fails(self):
         telegram = FakeTelegram(group_ok=False)
         self.send(make_pick(1, screens=FLOW_STEPS[:4]), telegram)
         self.assertEqual([url for url, _ in telegram.photos], list(FLOW_STEPS[:4]))
-        self.assertEqual(telegram.messages, [])
+        self.assertEqual(len(telegram.messages), 1)  # подпись с кнопкой
 
-    def test_text_survives_when_nothing_can_be_shown(self):
-        telegram = FakeTelegram(photo_ok=False, group_ok=False)
+    def test_button_survives_when_nothing_can_be_shown(self):
+        telegram = FakeTelegram(media_ok=False, group_ok=False)
         self.send(make_pick(1, screens=FLOW_STEPS[:3]), telegram)
         self.assertEqual(len(telegram.messages), 1)
-        self.assertIn("Открыть на Mobbin", telegram.messages[0][0])
+        text, _, keyboard = telegram.messages[0]
+        self.assertNotIn("Открыть на Mobbin", text)
+        self.assertEqual(keyboard["inline_keyboard"][0][0]["text"], "Открыть на Mobbin")
+
+    def test_single_pick_falls_back_to_text_with_a_button(self):
+        telegram = FakeTelegram(media_ok=False)
+        self.send(make_pick(1), telegram)
+        self.assertEqual(len(telegram.messages), 1)
+        self.assertIsNotNone(telegram.messages[0][2])
 
 
 class ShowPlanTest(unittest.TestCase):

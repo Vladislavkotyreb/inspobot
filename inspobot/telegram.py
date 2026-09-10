@@ -59,32 +59,56 @@ class Telegram:
     async def get_me(self) -> dict[str, Any]:
         return await self._call("getMe", {})
 
-    async def send_message(self, text: str, *, chat_id: str | None = None) -> dict[str, Any]:
-        return await self._call(
-            "sendMessage",
-            {
-                "chat_id": chat_id or self.chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": "true",
-            },
-        )
+    async def send_message(
+        self,
+        text: str,
+        *,
+        chat_id: str | None = None,
+        keyboard: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        data = {
+            "chat_id": chat_id or self.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        }
+        if keyboard:
+            data["reply_markup"] = json.dumps(keyboard)
+        return await self._call("sendMessage", data)
 
-    async def send_photo(
-        self, image_url: str, caption: str, *, chat_id: str | None = None
+    async def send_media(
+        self,
+        image_url: str,
+        caption: str,
+        *,
+        as_document: bool = False,
+        keyboard: dict[str, Any] | None = None,
+        chat_id: str | None = None,
     ) -> bool:
-        """Сначала пробуем отдать ссылку Telegram, потом качаем сами.
+        """Одна картинка: файлом или фотографией, с кнопками под ней.
 
-        Возвращает False, если картинку доставить не вышло, — вызывающий код
-        тогда шлёт тот же текст без изображения.
+        `as_document=True` шлёт исходный файл — Telegram его не сжимает, и
+        мелкий текст на экране остаётся читаемым.
+
+        Сначала пробуем отдать ссылку Telegram, потом качаем сами. Возвращает
+        False, если доставить не вышло, — вызывающий код тогда шлёт тот же
+        текст без изображения.
         """
-        target = chat_id or self.chat_id
-        base = {"chat_id": target, "caption": caption, "parse_mode": "HTML"}
+        method = "sendDocument" if as_document else "sendPhoto"
+        field = "document" if as_document else "photo"
+        base: dict[str, Any] = {
+            "chat_id": chat_id or self.chat_id,
+            "caption": caption,
+            "parse_mode": "HTML",
+        }
+        if keyboard:
+            base["reply_markup"] = json.dumps(keyboard)
+
         try:
-            await self._call("sendPhoto", {**base, "photo": image_url})
+            await self._call(method, {**base, field: image_url})
             return True
         except TelegramError as exc:
-            log.info("sendPhoto по ссылке не прошёл (%s), качаю сам", exc)
+            log.info("%s по ссылке не прошёл (%s), качаю сам", method, exc)
 
         try:
             blob = await self._client.get(image_url, follow_redirects=True)
@@ -92,13 +116,13 @@ class Telegram:
             content_type = blob.headers.get("content-type", "image/jpeg")
             suffix = "webp" if "webp" in content_type else "jpg"
             await self._call(
-                "sendPhoto",
+                method,
                 base,
-                files={"photo": (f"screen.{suffix}", blob.content, content_type)},
+                files={field: (f"screen.{suffix}", blob.content, content_type)},
             )
             return True
         except (httpx.HTTPError, TelegramError) as exc:
-            log.warning("Не удалось отправить картинку %s: %s", image_url, exc)
+            log.warning("Не удалось отправить %s: %s", image_url, exc)
             return False
 
     async def pause(self) -> None:
@@ -126,8 +150,10 @@ class Telegram:
         """Галерея из нескольких картинок одним сообщением.
 
         `as_document=True` отправляет исходные файлы: Telegram не сжимает их,
-        и мелкий текст на экранах остаётся читаемым. Ценой того, что вместо
-        плитки получается список вложений.
+        и мелкий текст на экранах остаётся читаемым.
+
+        Кнопок у галереи не бывает: sendMediaGroup не принимает reply_markup.
+        Поэтому подпись с кнопкой уходит отдельным сообщением перед галереей.
         """
         if not urls:
             return False

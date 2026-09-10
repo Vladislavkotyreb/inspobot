@@ -73,5 +73,13 @@ def caption_html(section: Section, pick: Pick, index: int, total: int) -> str:
         parts.append(escape(pick.pattern))
     if pick.note:
         parts.append(escape(pick.note))
-    parts.append(f'<a href="{escape(pick.mobbin_url, quote=True)}">Открыть на Mobbin</a>')
+    # Ссылки в тексте нет: она уехала в кнопку под сообщением.
     return _clip("\n".join(parts), CAPTION_LIMIT)
+
+
+OPEN_LABEL = "Открыть на Mobbin"
+
+
+def pick_keyboard(pick: Pick) -> dict:
+    """Кнопка под находкой вместо ссылки в тексте."""
+    return {"inline_keyboard": [[{"text": OPEN_LABEL, "url": pick.mobbin_url}]]}

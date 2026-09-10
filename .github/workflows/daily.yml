@@ -77,7 +77,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-5' }}
           INSPOBOT_EFFORT: ${{ vars.INSPOBOT_EFFORT || 'medium' }}
-          INSPOBOT_IMAGE_MODE: ${{ vars.INSPOBOT_IMAGE_MODE || 'photo' }}
+          INSPOBOT_IMAGE_MODE: ${{ vars.INSPOBOT_IMAGE_MODE || 'document' }}
           INSPOBOT_TZ: ${{ vars.INSPOBOT_TZ || 'Europe/Moscow' }}
           INSPOBOT_PROFILE: config/profile.json
           INSPOBOT_CHATS: var/chats.txt

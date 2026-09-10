@@ -4,7 +4,15 @@ from datetime import date
 from inspobot.models import Digest, Pick, Section
 from inspobot.profile import Day as ScheduleDay
 from inspobot.profile import Schedule, Slot, plan_for_day
-from inspobot.render import CAPTION_LIMIT, caption_html, header_html, human_date, section_icon
+from inspobot.render import (
+    CAPTION_LIMIT,
+    OPEN_LABEL,
+    caption_html,
+    header_html,
+    human_date,
+    pick_keyboard,
+    section_icon,
+)
 
 DAY = date(2026, 9, 14)
 SCHEDULE = Schedule(
@@ -97,7 +105,13 @@ class CaptionTest(unittest.TestCase):
         self.assertIn("1/3", html)
         self.assertIn(section.topic.title, html)
         self.assertIn("<b>Claude</b>", html)
-        self.assertIn('href="https://mobbin.com/screens/', html)
+
+    def test_link_moved_out_of_the_text(self):
+        """Ссылка живёт в кнопке — в подписи её быть не должно."""
+        section = make_section(0)
+        html = caption_html(section, section.picks[0], 1, 3)
+        self.assertNotIn("href=", html)
+        self.assertNotIn(OPEN_LABEL, html)
 
     def test_escapes_markup_from_the_model(self):
         section = make_section(0, [make_pick(app_name="A & <b>B</b>", note="1 < 2")])
@@ -116,6 +130,21 @@ class CaptionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class KeyboardTest(unittest.TestCase):
+    def test_one_button_leading_to_mobbin(self):
+        pick = make_pick()
+        rows = pick_keyboard(pick)["inline_keyboard"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(rows[0]), 1)
+        self.assertEqual(rows[0][0]["text"], OPEN_LABEL)
+        self.assertEqual(rows[0][0]["url"], pick.mobbin_url)
+
+    def test_button_carries_a_url_not_a_callback(self):
+        """URL-кнопка работает без живого процесса — его у дайджеста нет."""
+        button = pick_keyboard(make_pick())["inline_keyboard"][0][0]
+        self.assertNotIn("callback_data", button)
 
 
 class FlowCaptionTest(unittest.TestCase):

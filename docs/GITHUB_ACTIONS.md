@@ -35,7 +35,7 @@ cd ~/Desktop/inspobot && cat var/mobbin_token.json | pbcopy
 |---|---|
 | `ANTHROPIC_MODEL` | `claude-sonnet-5` |
 | `INSPOBOT_EFFORT` | `medium` |
-| `INSPOBOT_IMAGE_MODE` | `photo` |
+| `INSPOBOT_IMAGE_MODE` | `document` |
 | `INSPOBOT_TZ` | `Europe/Moscow` |
 
 ## Токен для записи секретов
