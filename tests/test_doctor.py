@@ -177,3 +177,35 @@ class MakeClientTest(unittest.TestCase):
             Config(**{**self.base, "anthropic_api_key": "k", "anthropic_workspace_id": "wrkspc_1"})
         )
         self.assertEqual(with_ws.default_headers[WORKSPACE_HEADER], "wrkspc_1")
+
+
+class LoggingSetupTest(unittest.TestCase):
+    """--verbose не должен включать отладку SDK: в теле запроса лежит токен Mobbin."""
+
+    def tearDown(self):
+        import logging
+
+        from inspobot.logs import NOISY
+
+        for name in ("inspobot", *NOISY):
+            logging.getLogger(name).setLevel(logging.NOTSET)
+
+    def test_verbose_raises_only_our_own_logger(self):
+        import logging
+
+        from inspobot import logs
+
+        logs.setup(verbose=True)
+        self.assertEqual(logging.getLogger("inspobot").level, logging.DEBUG)
+        for name in logs.NOISY:
+            self.assertEqual(
+                logging.getLogger(name).level, logging.WARNING, f"{name} печатал бы тело запроса"
+            )
+
+    def test_quiet_mode_keeps_our_logger_at_info(self):
+        import logging
+
+        from inspobot import logs
+
+        logs.setup(verbose=False)
+        self.assertEqual(logging.getLogger("inspobot").level, logging.INFO)

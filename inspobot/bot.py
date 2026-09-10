@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from .config import Config
 from .daily import run_once, today_in
+from .logs import setup as setup_logging
 from .telegram import Telegram
 from .topics import topics_for
 
@@ -115,9 +116,7 @@ async def amain() -> None:
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    setup_logging()
     try:
         asyncio.run(amain())
     except KeyboardInterrupt:

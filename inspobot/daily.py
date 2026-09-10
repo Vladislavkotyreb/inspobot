@@ -18,6 +18,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from .config import Config
+from .logs import setup as setup_logging
 from .curator import collect
 from .models import Digest
 from .mobbin_auth import get_access_token
@@ -131,13 +132,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="отправить, даже если сегодня уже слали")
     parser.add_argument("--dry-run", action="store_true", help="показать в консоли, ничего не отправлять")
     parser.add_argument("--day", help="дата в формате ГГГГ-ММ-ДД (по умолчанию сегодня)")
-    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="подробный лог самого бота (тела запросов к API не печатаются)",
+    )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    setup_logging(args.verbose)
 
     config = Config.from_env()
     required = ("anthropic_api_key",) if args.dry_run else (

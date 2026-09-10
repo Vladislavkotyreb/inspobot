@@ -136,6 +136,7 @@ sudo systemctl restart inspobot-bot   # если работает демоном
 |---|---|
 | Утром ничего не пришло | `inspobot.doctor`, затем `var/cron.log` или `journalctl -u inspobot-daily` |
 | «Нет файла с токенами Mobbin» | [MOBBIN_AUTH.md](MOBBIN_AUTH.md) |
+| Нужен совсем подробный лог | `--verbose` безопасен. А вот `ANTHROPIC_LOG=debug` печатает тело запроса вместе с токеном Mobbin — такой лог никому не пересылайте |
 | Пришёл текст без картинок | Telegram не смог забрать превью; ссылки на Mobbin в сообщениях остаются рабочими |
 | «Подборка на … уже уходила» | нормальное поведение; для повтора `--force` |
 | Хочется отправить заново | `.venv/bin/python -m inspobot.daily --force` |
