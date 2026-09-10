@@ -96,14 +96,30 @@ def check_anthropic(config: Config) -> Result:
     if not config.anthropic_api_key:
         return Result("Anthropic", FAIL, "не задан ANTHROPIC_API_KEY")
     try:
-        import anthropic
+        from .client import make_client
 
-        info = anthropic.Anthropic(api_key=config.anthropic_api_key).models.retrieve(
-            config.model
-        )
+        info = make_client(config).models.retrieve(config.model)
     except Exception as exc:  # noqa: BLE001
-        return Result("Anthropic", FAIL, f"{type(exc).__name__}: {exc}")
-    return Result("Anthropic", OK, f"модель доступна: {info.id}")
+        return Result("Anthropic", FAIL, explain_anthropic_error(exc))
+    suffix = " (workspace задан)" if config.anthropic_workspace_id else ""
+    return Result("Anthropic", OK, f"модель доступна: {info.id}{suffix}")
+
+
+def explain_anthropic_error(exc: Exception) -> str:
+    """Частые отказы API — человеческим языком вместо сырого JSON."""
+    text = str(exc)
+    if "not scoped to a workspace" in text or "anthropic-workspace-id" in text:
+        return (
+            "ключ выпущен на уровне организации и не привязан к workspace. "
+            "Либо создайте в консоли ключ внутри нужного workspace, "
+            "либо добавьте в .env строку ANTHROPIC_WORKSPACE_ID=wrkspc_… "
+            "(id виден в адресной строке консоли на странице workspace)"
+        )
+    if "credit balance is too low" in text or "insufficient" in text.lower():
+        return "на балансе нет средств — пополните его в консоли, раздел Billing"
+    if "invalid x-api-key" in text or "authentication_error" in text:
+        return "ключ не принят — проверьте строку 8 в .env, он должен начинаться с sk-ant-"
+    return f"{type(exc).__name__}: {text}"
 
 
 def check_mobbin(config: Config) -> Result:

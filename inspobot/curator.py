@@ -14,6 +14,7 @@ from typing import Any, Sequence
 
 import anthropic
 
+from .client import make_client
 from .config import Config
 from .models import Digest
 from .prompt import (
@@ -103,7 +104,7 @@ def collect(
     ios_seen: Sequence[str] = (),
     web_seen: Sequence[str] = (),
 ) -> Digest:
-    client = anthropic.Anthropic(api_key=config.anthropic_api_key or None)
+    client = make_client(config)
     messages = build_messages(
         day, mobile, desktop, config.picks_per_platform, ios_seen, web_seen
     )

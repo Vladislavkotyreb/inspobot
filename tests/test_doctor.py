@@ -132,3 +132,48 @@ class TelegramCheckTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExplainAnthropicErrorTest(unittest.TestCase):
+    def test_workspace_error_gets_instructions(self):
+        message = doctor.explain_anthropic_error(
+            RuntimeError(
+                "Error code: 400 - {'message': 'This API key is not scoped to a "
+                "workspace, so this request must include the anthropic-workspace-id header'}"
+            )
+        )
+        self.assertIn("workspace", message)
+        self.assertIn("ANTHROPIC_WORKSPACE_ID", message)
+        self.assertNotIn("Error code", message)
+
+    def test_empty_balance(self):
+        message = doctor.explain_anthropic_error(RuntimeError("Your credit balance is too low"))
+        self.assertIn("Billing", message)
+
+    def test_bad_key(self):
+        message = doctor.explain_anthropic_error(RuntimeError("invalid x-api-key"))
+        self.assertIn("sk-ant-", message)
+
+    def test_unknown_error_is_passed_through(self):
+        message = doctor.explain_anthropic_error(ValueError("что-то новое"))
+        self.assertIn("ValueError", message)
+        self.assertIn("что-то новое", message)
+
+
+class MakeClientTest(unittest.TestCase):
+    def setUp(self):
+        for key in list(os.environ):
+            if key.startswith(("INSPOBOT_", "MOBBIN_", "TELEGRAM_", "ANTHROPIC_")):
+                del os.environ[key]
+        self.base = Config.from_env().__dict__
+
+    def test_header_added_only_when_workspace_is_set(self):
+        from inspobot.client import WORKSPACE_HEADER, make_client
+
+        without = make_client(Config(**{**self.base, "anthropic_api_key": "k"}))
+        self.assertNotIn(WORKSPACE_HEADER, without.default_headers)
+
+        with_ws = make_client(
+            Config(**{**self.base, "anthropic_api_key": "k", "anthropic_workspace_id": "wrkspc_1"})
+        )
+        self.assertEqual(with_ws.default_headers[WORKSPACE_HEADER], "wrkspc_1")

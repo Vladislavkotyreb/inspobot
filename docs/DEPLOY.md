@@ -40,7 +40,7 @@ nano .env
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | [@BotFather](https://t.me/BotFather) → `/newbot` |
 | `TELEGRAM_CHAT_ID` | напишите боту любое сообщение, затем `inspobot.doctor` покажет id |
-| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) → API keys |
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) → API keys. Ключ лучше создавать **внутри workspace**: ключ уровня организации API отклоняет, пока не задан `ANTHROPIC_WORKSPACE_ID` |
 
 Токен Mobbin получается отдельно — см. [MOBBIN_AUTH.md](MOBBIN_AUTH.md).
 

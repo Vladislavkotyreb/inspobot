@@ -49,6 +49,7 @@ class Config:
     telegram_token: str
     telegram_chat_id: str
     anthropic_api_key: str
+    anthropic_workspace_id: str
     model: str
     effort: str
     max_tokens: int
@@ -70,6 +71,7 @@ class Config:
             telegram_token=os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(),
             telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID", "").strip(),
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", "").strip(),
+            anthropic_workspace_id=os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip(),
             model=os.environ.get("ANTHROPIC_MODEL", "claude-opus-5").strip(),
             effort=os.environ.get("INSPOBOT_EFFORT", "high").strip(),
             max_tokens=_int("INSPOBOT_MAX_TOKENS", 32000),
