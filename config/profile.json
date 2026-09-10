@@ -1,0 +1,160 @@
+{
+  "days": {
+    "mon": {
+      "title": "Геймификация",
+      "slots": [
+        {
+          "kind": "s",
+          "platform": "i",
+          "audience": "c",
+          "count": 4,
+          "topics": [
+            "progress",
+            "streak",
+            "rewards",
+            "challenges",
+            "leaderboard",
+            "levels"
+          ]
+        },
+        {
+          "kind": "f",
+          "platform": "i",
+          "audience": "c",
+          "count": 1,
+          "topics": [
+            "gamified-onboarding"
+          ]
+        }
+      ]
+    },
+    "tue": {
+      "title": "Логика сложных процессов",
+      "slots": [
+        {
+          "kind": "f",
+          "platform": "w",
+          "audience": "b",
+          "count": 3,
+          "topics": [
+            "setup",
+            "integration",
+            "import",
+            "approval",
+            "automation",
+            "migration"
+          ]
+        },
+        {
+          "kind": "s",
+          "platform": "w",
+          "audience": "b",
+          "count": 2,
+          "topics": [
+            "workflow",
+            "automation",
+            "approval",
+            "permissions-matrix",
+            "filters"
+          ]
+        }
+      ]
+    },
+    "wed": {
+      "title": "Пейволлы и оплата",
+      "slots": [
+        {
+          "kind": "s",
+          "platform": "i",
+          "audience": "c",
+          "count": 3,
+          "topics": [
+            "paywall",
+            "checkout",
+            "promo",
+            "subscription",
+            "trial"
+          ]
+        },
+        {
+          "kind": "f",
+          "platform": "i",
+          "audience": "c",
+          "count": 2,
+          "topics": [
+            "subscribe",
+            "purchase",
+            "addcard",
+            "upgrade-c",
+            "cancel"
+          ]
+        }
+      ]
+    },
+    "thu": {
+      "title": "Плотные данные: таблицы и дашборды",
+      "slots": [
+        {
+          "kind": "s",
+          "platform": "w",
+          "audience": "b",
+          "count": 4,
+          "topics": [
+            "dashboard",
+            "table",
+            "filters",
+            "audit",
+            "inbox"
+          ]
+        }
+      ]
+    },
+    "fri": {
+      "title": "Как продукты себя продают",
+      "slots": [
+        {
+          "kind": "w",
+          "platform": "",
+          "audience": "b",
+          "count": 3,
+          "topics": []
+        },
+        {
+          "kind": "w",
+          "platform": "",
+          "audience": "c",
+          "count": 2,
+          "topics": []
+        }
+      ]
+    },
+    "sat": null,
+    "sun": {
+      "title": "Первое впечатление",
+      "slots": [
+        {
+          "kind": "f",
+          "platform": "i",
+          "audience": "c",
+          "count": 2,
+          "topics": [
+            "signup",
+            "onboarding",
+            "kyc"
+          ]
+        },
+        {
+          "kind": "s",
+          "platform": "i",
+          "audience": "c",
+          "count": 2,
+          "topics": [
+            "onboarding",
+            "empty",
+            "permissions"
+          ]
+        }
+      ]
+    }
+  }
+}

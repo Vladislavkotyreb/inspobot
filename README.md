@@ -95,13 +95,13 @@ cp .env.example .env && nano .env      # токен бота, ключ Anthropic
 .venv/bin/python -m inspobot.daily --force   # отправить в чат
 ```
 
-Дальше — расписание. На своём Маке хватит одной команды:
+Дальше — расписание, на выбор:
 
-```bash
-./deploy/install-macos.sh
-```
-
-На сервере — строка в cron или systemd-таймер, оба в [docs/DEPLOY.md](docs/DEPLOY.md).
+| Где | Как | Чем плохо |
+|---|---|---|
+| **GitHub Actions** | секреты в настройках репозитория, [docs/GITHUB_ACTIONS.md](docs/GITHUB_ACTIONS.md) | бесплатно, но время плавает на десятки минут |
+| **Свой Мак** | `./deploy/install-macos.sh` | если ноутбук выключен, день пропадёт |
+| **Сервер** | cron или systemd, [docs/DEPLOY.md](docs/DEPLOY.md) | стоит денег, зато точно и всегда |
 
 ## Команды
 
