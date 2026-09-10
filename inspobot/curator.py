@@ -8,7 +8,6 @@ Claude сам подключается к удалённому MCP-сервер�
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import date
 from typing import Any, Sequence
@@ -17,18 +16,16 @@ import anthropic
 
 from .client import make_client
 from .config import Config
-from .models import Digest, Pick
+from .catalog import Topic
+from .models import Digest
+from .profile import Slot
 from .prompt import (
     DIGEST_SCHEMA,
     SYSTEM_PROMPT,
     CuratorError,
-    build_messages,
-    build_selection_messages,
+    build_digest_messages,
     parse_digest,
-    parse_picks,
 )
-from .wizard import Selection, api_platform, topic_of
-from .topics import Topic
 
 MCP_BETA = "mcp-client-2025-11-20"
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -102,59 +99,20 @@ def _run(client: anthropic.Anthropic, request: dict[str, Any], messages: list[di
 def collect(
     config: Config,
     day: date,
-    mobile: Topic,
-    desktop: Topic,
+    plan: Sequence[tuple[Slot, Topic]],
     mobbin_token: str,
-    ios_seen: Sequence[str] = (),
-    web_seen: Sequence[str] = (),
+    seen_by_platform: dict[str, Sequence[str]] | None = None,
 ) -> Digest:
+    """Один запрос к Messages API собирает весь дайджест целиком."""
     client = make_client(config)
-    messages = build_messages(
-        day, mobile, desktop, config.picks_per_platform, ios_seen, web_seen
-    )
+    messages = build_digest_messages(day, plan, seen_by_platform)
     message = _run(client, build_request(config, mobbin_token), messages)
     log.info(
         "Токены: вход %s, выход %s",
         getattr(message.usage, "input_tokens", "?"),
         getattr(message.usage, "output_tokens", "?"),
     )
-    return parse_digest(
-        _final_text(message), day, mobile, desktop, set(ios_seen) | set(web_seen)
-    )
-
-
-def collect_selection(
-    config: Config,
-    selection: Selection,
-    mobbin_token: str,
-    count: int = 5,
-    seen: Sequence[str] = (),
-) -> tuple[str, tuple[Pick, ...]]:
-    """Подбор по атрибутам, выбранным в мастере. Возвращает (итог, находки)."""
-    topic = topic_of(selection)
-    if topic is None:
-        raise CuratorError("Выбор не заполнен до конца.")
-
-    messages = build_selection_messages(
-        kind=selection.kind,
-        platform=api_platform(selection),
-        query=topic.query,
-        title=topic.title,
-        count=count,
-        seen=seen if selection.kind == "s" else (),
-    )
-    client = make_client(config)
-    message = _run(client, build_request(config, mobbin_token), messages)
-    log.info(
-        "Подбор %s: вход %s, выход %s",
-        selection,
-        getattr(message.usage, "input_tokens", "?"),
-        getattr(message.usage, "output_tokens", "?"),
-    )
-
-    try:
-        data = json.loads(_final_text(message))
-    except json.JSONDecodeError as exc:
-        raise CuratorError(f"Ответ модели — не JSON: {exc}") from exc
-    picks = parse_picks(data, selection.kind, set(seen))
-    return str(data.get("summary", "")).strip(), picks
+    seen: set[str] = set()
+    for ids in (seen_by_platform or {}).values():
+        seen.update(ids)
+    return parse_digest(_final_text(message), day, plan, seen)

@@ -58,7 +58,7 @@ class Config:
     mobbin_token_file: Path
     mobbin_access_token: str
     db_path: Path
-    picks_per_platform: int
+    profile_path: Path
     timezone: str
     hour: int
     minute: int
@@ -82,7 +82,9 @@ class Config:
             ),
             mobbin_access_token=os.environ.get("MOBBIN_ACCESS_TOKEN", "").strip(),
             db_path=Path(os.environ.get("INSPOBOT_DB", str(var_dir / "inspobot.sqlite3"))),
-            picks_per_platform=_int("INSPOBOT_PICKS_PER_PLATFORM", 5),
+            profile_path=Path(
+                os.environ.get("INSPOBOT_PROFILE", str(var_dir / "profile.json"))
+            ),
             timezone=os.environ.get("INSPOBOT_TZ", "Europe/Moscow").strip(),
             hour=_int("INSPOBOT_HOUR", 11),
             minute=_int("INSPOBOT_MINUTE", 0),

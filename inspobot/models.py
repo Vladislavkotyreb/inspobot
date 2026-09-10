@@ -1,4 +1,4 @@
-"""Данные подборки. Ни сети, ни SDK — чтобы форматирование и разбор ответа
+"""Данные дайджеста. Ни сети, ни SDK — чтобы форматирование и разбор ответа
 проверялись тестами без установленных зависимостей.
 """
 
@@ -7,7 +7,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 
-from .topics import Topic
+from .catalog import Topic
+from .profile import Slot
 
 
 @dataclass(frozen=True)
@@ -22,12 +23,33 @@ class Pick:
 
 
 @dataclass(frozen=True)
-class Digest:
-    day: date
-    mobile_topic: Topic
-    desktop_topic: Topic
-    summary: str
+class Section:
+    """Один блок дайджеста: слот профиля, тема дня и что нашлось."""
+
+    slot: Slot
+    topic: Topic
     picks: tuple[Pick, ...]
 
-    def by_platform(self, platform: str) -> tuple[Pick, ...]:
-        return tuple(p for p in self.picks if p.platform == platform)
+    def title(self) -> str:
+        return f"{self.slot.title()} · {self.topic.title}"
+
+
+@dataclass(frozen=True)
+class Digest:
+    day: date
+    summary: str
+    sections: tuple[Section, ...]
+
+    @property
+    def picks(self) -> tuple[Pick, ...]:
+        return tuple(pick for section in self.sections for pick in section.picks)
+
+    @property
+    def screen_picks(self) -> tuple[Pick, ...]:
+        """Только экраны — их id уходят в дедупликацию, флоу и секции нет."""
+        return tuple(
+            pick
+            for section in self.sections
+            if section.slot.kind == "s"
+            for pick in section.picks
+        )

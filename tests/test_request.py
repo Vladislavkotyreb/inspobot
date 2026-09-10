@@ -1,15 +1,10 @@
-"""Форма запроса к Messages API и расчёт времени следующего запуска."""
+"""Форма запроса к Messages API."""
 
 import os
 import unittest
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
-from inspobot.bot import next_run_at
 from inspobot.config import Config
 from inspobot.curator import FALLBACK_BETA, MCP_BETA, build_request, drop_fallbacks
-
-MSK = ZoneInfo("Europe/Moscow")
 
 
 def config(**over):
@@ -46,20 +41,6 @@ class BuildRequestTest(unittest.TestCase):
         self.assertNotIn(FALLBACK_BETA, request["betas"])
         self.assertIn(MCP_BETA, request["betas"])
         self.assertFalse(drop_fallbacks(request, "fallback"))  # второй раз нечего снимать
-
-
-class NextRunTest(unittest.TestCase):
-    def test_today_if_still_ahead(self):
-        now = datetime(2026, 9, 2, 9, 30, tzinfo=MSK)
-        self.assertEqual(next_run_at(now, 11, 0), datetime(2026, 9, 2, 11, 0, tzinfo=MSK))
-
-    def test_tomorrow_if_already_passed(self):
-        now = datetime(2026, 9, 2, 11, 0, 1, tzinfo=MSK)
-        self.assertEqual(next_run_at(now, 11, 0), datetime(2026, 9, 3, 11, 0, tzinfo=MSK))
-
-    def test_exactly_on_time_moves_to_next_day(self):
-        now = datetime(2026, 9, 2, 11, 0, tzinfo=MSK)
-        self.assertEqual(next_run_at(now, 11, 0), datetime(2026, 9, 3, 11, 0, tzinfo=MSK))
 
 
 if __name__ == "__main__":

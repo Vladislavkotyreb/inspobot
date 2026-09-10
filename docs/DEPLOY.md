@@ -63,6 +63,13 @@ nano .env
 Допишите `TELEGRAM_CHAT_ID` в `.env` и прогоните ещё раз — теперь всё зелёное.
 `--send-test` дополнительно напишет в чат.
 
+Затем — состав дайджеста:
+
+```bash
+.venv/bin/python -m inspobot.setup_cli   # пройти шаги и сохранить профиль
+.venv/bin/python -m inspobot.daily --plan  # проверить, что получилось
+```
+
 Дальше сама подборка:
 
 ```bash
@@ -115,26 +122,12 @@ cron на macOS для этого не годится: если ноутбук �
 пробуждении — подборка придёт позже 11:00, но придёт. А если Мак был выключен
 целиком, дня не будет вовсе: для гарантии нужен сервер.
 
-### Вариант В — бот-демон со своим расписанием
-
-Если хочется, чтобы работали команды `/now` и `/topics`, держите процесс живым:
-
-```bash
-sudo cp deploy/inspobot-bot.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now inspobot-bot
-journalctl -u inspobot-bot -f
-```
-
-Тогда cron и таймер не нужны: расписание внутри процесса. **Не включайте
-таймер и демон одновременно** — вторая подборка всё равно не уйдёт, но в логах
-будут лишние ошибки.
-
 ## 5. Что где лежит
 
 ```
 /opt/inspobot/.env                    секреты, права 600
 /opt/inspobot/var/mobbin_token.json   токены Mobbin, права 600
+/opt/inspobot/var/profile.json        состав дайджеста
 /opt/inspobot/var/inspobot.sqlite3    что уже присылали
 /opt/inspobot/var/cron.log            лог, если запускаете через cron
 ```
@@ -145,7 +138,6 @@ journalctl -u inspobot-bot -f
 
 ```bash
 cd /opt/inspobot && git pull && .venv/bin/pip install -r requirements.txt
-sudo systemctl restart inspobot-bot   # если работает демоном
 ```
 
 ## Диагностика

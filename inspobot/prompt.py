@@ -1,7 +1,8 @@
 """Промпт, схема ответа и разбор — без обращений к сети.
 
 Всё, что можно проверить тестом, живёт здесь; в curator.py остаётся только
-вызов Messages API.
+вызов Messages API. Один запрос собирает весь дайджест: модель по очереди
+дёргает нужный инструмент Mobbin для каждого блока и возвращает единый JSON.
 """
 
 from __future__ import annotations
@@ -11,16 +12,25 @@ import re
 from datetime import date
 from typing import Any, Sequence
 
-from .models import Digest, Pick
-from .topics import Topic
+from .catalog import Topic
+from .models import Digest, Pick, Section
+from .profile import Slot
 
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 
+TOOL_BY_KIND = {"s": "search_screens", "f": "search_flows", "w": "search_sections"}
+
+# Потолки инструментов Mobbin: screens и sections до 30, flows до 10.
+MAX_LIMIT = {"s": 30, "f": 10, "w": 30}
+
+KIND_WORD = {"s": "экранов", "f": "флоу", "w": "секций"}
+
 PICK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "slot": {"type": "integer"},
         "platform": {"type": "string", "enum": ["ios", "web"]},
         "screen_id": {"type": "string"},
         "mobbin_url": {"type": "string"},
@@ -30,7 +40,8 @@ PICK_SCHEMA: dict[str, Any] = {
         "note": {"type": "string"},
     },
     "required": [
-        "platform", "screen_id", "mobbin_url", "image_url", "app_name", "pattern", "note",
+        "slot", "platform", "screen_id", "mobbin_url", "image_url",
+        "app_name", "pattern", "note",
     ],
     "additionalProperties": False,
 }
@@ -53,37 +64,35 @@ SYSTEM_PROMPT = """\
 1. Работай только с данными инструментов Mobbin. Ни один экран, ссылку,
    название приложения или id нельзя придумывать или менять — копируй
    значения из ответа инструмента дословно.
-2. Обязательно посмотри на сами изображения экранов и отбирай по картинке,
+2. Обязательно посмотри на сами изображения и отбирай по картинке,
    а не по названию приложения.
-3. Отбирай разнообразно: не больше одного экрана от одного приложения
-   в пределах подборки.
+3. Отбирай разнообразно: не больше одного результата от одного приложения
+   в пределах блока.
 4. Комментарий (`note`) пиши по-русски, 1–2 предложения, про конкретное
-   решение на экране: что сделано и почему это работает. Без общих слов
-   вроде «чистый современный дизайн».
+   решение: что сделано и почему это работает. Без общих слов вроде
+   «чистый современный дизайн». Для флоу опиши устройство сценария:
+   сколько шагов и что решает каждый.
 5. `pattern` — короткая метка приёма на русском, 2–4 слова.
-6. Если инструмент вернул меньше подходящих экранов, чем просили, — верни
-   меньше. Добивать слабыми вариантами нельзя.
+6. Если инструмент вернул меньше подходящего, чем просили, — верни меньше.
+   Добивать слабыми вариантами нельзя.
+7. `slot` — номер блока, для которого найден результат. Не путай блоки.
 """
 
-USER_TEMPLATE = """\
-Собери подборку на {day}.
+DIGEST_TEMPLATE = """\
+Собери подборку на {day}. В ней {count} {blocks}.
 
-Мобильная тема дня: {mobile_title}.
-Запрос для поиска (platform="ios"): {mobile_query}
+{sections}
+В `summary` — одно-два предложения по-русски: что объединяет сегодняшнюю
+подборку и на что смотреть в первую очередь.
 
-Десктопная тема дня: {desktop_title}.
-Запрос для поиска (platform="web"): {desktop_query}
+Верни JSON по заданной схеме: в `picks` результаты всех блоков подряд,
+у каждого проставлен свой `slot`.
+"""
 
-Что сделать:
-1. Вызови search_screens с platform="ios" и мобильным запросом, limit={search_limit},
-   mode="deep".{ios_exclude}
-2. Вызови search_screens с platform="web" и десктопным запросом, limit={search_limit},
-   mode="deep".{web_exclude}
-3. Отбери лучшие {picks} экрана для ios и лучшие {picks} для web.
-4. В `summary` — одно-два предложения по-русски: что общего в сегодняшней
-   подборке и на что посмотреть в первую очередь.
-
-Верни JSON по заданной схеме: поле `picks` — сначала ios, потом web.
+SECTION_TEMPLATE = """\
+Блок {index} — {title}, тема «{topic}».
+{call}
+Отбери лучшие {count}, у каждого поставь slot={index} и platform="{platform}".
 """
 
 
@@ -91,34 +100,56 @@ class CuratorError(RuntimeError):
     pass
 
 
-def _exclude_clause(ids: Sequence[str]) -> str:
-    if not ids:
-        return ""
-    listed = ", ".join(f'"{i}"' for i in ids)
-    return (
-        "\n   Обязательно передай exclude_screen_ids=[" + listed + "] — "
-        "эти экраны уже присылали."
-    )
+def _plural_blocks(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return "блок"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return "блока"
+    return "блоков"
 
 
-def build_messages(
+def search_limit(kind: str, count: int) -> int:
+    """Сколько кандидатов просить: с запасом на отбор, но в пределах API."""
+    return min(MAX_LIMIT[kind], max(count * 3, 8))
+
+
+def _tool_call(slot: Slot, topic: Topic, seen: Sequence[str]) -> str:
+    tool = TOOL_BY_KIND[slot.kind]
+    limit = search_limit(slot.kind, slot.count)
+    if slot.kind == "w":
+        return f'Вызови {tool} с query="{topic.query}", limit={limit}.'
+    call = f'Вызови {tool} с query="{topic.query}", platform="{slot.api_platform}", limit={limit}'
+    if slot.kind == "s":
+        call += ', mode="deep"'
+        if seen:
+            listed = ", ".join(f'"{i}"' for i in seen)
+            call += f", exclude_screen_ids=[{listed}]"
+    return call + "."
+
+
+def build_digest_messages(
     day: date,
-    mobile: Topic,
-    desktop: Topic,
-    picks: int,
-    ios_seen: Sequence[str] = (),
-    web_seen: Sequence[str] = (),
+    plan: Sequence[tuple[Slot, Topic]],
+    seen_by_platform: dict[str, Sequence[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    prompt = USER_TEMPLATE.format(
+    seen_by_platform = seen_by_platform or {}
+    blocks = []
+    for index, (slot, topic) in enumerate(plan, start=1):
+        blocks.append(
+            SECTION_TEMPLATE.format(
+                index=index,
+                title=slot.title(),
+                topic=topic.title,
+                call=_tool_call(slot, topic, seen_by_platform.get(slot.api_platform, ())),
+                count=slot.count,
+                platform=slot.api_platform,
+            )
+        )
+    prompt = DIGEST_TEMPLATE.format(
         day=day.isoformat(),
-        mobile_title=mobile.title,
-        mobile_query=mobile.query,
-        desktop_title=desktop.title,
-        desktop_query=desktop.query,
-        picks=picks,
-        search_limit=min(30, max(picks * 3, 12)),
-        ios_exclude=_exclude_clause(ios_seen),
-        web_exclude=_exclude_clause(web_seen),
+        count=len(plan),
+        blocks=_plural_blocks(len(plan)),
+        sections="\n".join(blocks),
     )
     return [{"role": "user", "content": prompt}]
 
@@ -127,8 +158,8 @@ def is_valid_pick(pick: dict[str, Any], kind: str = "s") -> bool:
     """Отсекает выдуманное: ссылка обязана быть с mobbin.com.
 
     У экранов id — заведомо uuid, это дополнительная проверка. У флоу и секций
-    формат id не подтверждён живым ответом, поэтому там требуется лишь
-    непустое значение: строгая проверка молча выбрасывала бы всё подряд.
+    формат id живым ответом не подтверждён, поэтому там требуется лишь непустое
+    значение: строгая проверка молча выбрасывала бы всё подряд.
     """
     ident = str(pick.get("screen_id", ""))
     if pick.get("platform") not in {"ios", "web"}:
@@ -142,11 +173,22 @@ def is_valid_pick(pick: dict[str, Any], kind: str = "s") -> bool:
     ) and str(pick.get("image_url", "")).startswith("https://")
 
 
+def _pick_from(item: dict[str, Any]) -> Pick:
+    return Pick(
+        platform=str(item["platform"]),
+        screen_id=str(item["screen_id"]),
+        mobbin_url=str(item["mobbin_url"]),
+        image_url=str(item["image_url"]),
+        app_name=str(item.get("app_name", "")).strip() or "—",
+        pattern=str(item.get("pattern", "")).strip(),
+        note=str(item.get("note", "")).strip(),
+    )
+
+
 def parse_digest(
     raw: str,
     day: date,
-    mobile: Topic,
-    desktop: Topic,
+    plan: Sequence[tuple[Slot, Topic]],
     seen: set[str] | None = None,
 ) -> Digest:
     try:
@@ -154,112 +196,38 @@ def parse_digest(
     except json.JSONDecodeError as exc:
         raise CuratorError(f"Ответ модели — не JSON: {exc}") from exc
 
-    return Digest(
-        day=day,
-        mobile_topic=mobile,
-        desktop_topic=desktop,
-        summary=str(data.get("summary", "")).strip(),
-        picks=parse_picks(data, "s", seen),
-    )
-
-
-def parse_picks(
-    data: dict[str, Any], kind: str = "s", seen: set[str] | None = None
-) -> tuple[Pick, ...]:
-    """Отобранное моделью — в валидные Pick, без повторов и уже показанного."""
     seen = seen or set()
-    picks: list[Pick] = []
-    used_ids: set[str] = set()
-    for item in data.get("picks", []):
-        if not isinstance(item, dict) or not is_valid_pick(item, kind):
-            continue
-        screen_id = str(item["screen_id"])
-        if screen_id in used_ids or screen_id in seen:
-            continue
-        used_ids.add(screen_id)
-        picks.append(
-            Pick(
-                platform=str(item["platform"]),
-                screen_id=screen_id,
-                mobbin_url=str(item["mobbin_url"]),
-                image_url=str(item["image_url"]),
-                app_name=str(item.get("app_name", "")).strip() or "—",
-                pattern=str(item.get("pattern", "")).strip(),
-                note=str(item.get("note", "")).strip(),
-            )
-        )
+    used: set[str] = set()
+    by_slot: dict[int, list[Pick]] = {i: [] for i in range(1, len(plan) + 1)}
 
-    if not picks:
+    for item in data.get("picks", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("slot", 0))
+        except (TypeError, ValueError):
+            continue
+        if index not in by_slot:
+            continue
+        slot, _ = plan[index - 1]
+        if not is_valid_pick(item, slot.kind):
+            continue
+        ident = str(item["screen_id"])
+        if ident in used or ident in seen:
+            continue
+        used.add(ident)
+        by_slot[index].append(_pick_from(item))
+
+    sections = tuple(
+        Section(slot=slot, topic=topic, picks=tuple(by_slot[index]))
+        for index, (slot, topic) in enumerate(plan, start=1)
+        if by_slot[index]
+    )
+    if not sections:
         raise CuratorError("Модель не вернула ни одного пригодного результата.")
 
-    return tuple(picks)
-
-
-# --- пошаговый подбор -------------------------------------------------------
-
-TOOL_BY_KIND = {"s": "search_screens", "f": "search_flows", "w": "search_sections"}
-
-# Потолки инструментов Mobbin: screens и sections до 30, flows до 10.
-LIMIT_BY_KIND = {"s": 18, "f": 8, "w": 18}
-
-KIND_WORD = {"s": "экранов", "f": "флоу", "w": "секций"}
-
-SELECTION_TEMPLATE = """\
-Подбери {word} по теме «{title}».
-
-Что сделать:
-1. {call}
-2. Отбери лучшие {count} и верни их в поле `picks`.
-3. В `summary` — одно-два предложения по-русски: что объединяет отобранное
-   и на что смотреть в первую очередь.
-
-{extra}\
-"""
-
-FLOW_EXTRA = (
-    "Для каждого флоу `image_url` — превью первого шага из ответа инструмента, "
-    "`mobbin_url` — ссылка на сам флоу. В `note` опиши, как устроен сценарий: "
-    "сколько шагов и что решает каждый.\n"
-    'В поле `platform` подставь "{platform}".'
-)
-
-SECTION_EXTRA = (
-    "У search_sections нет параметра platform: секции всегда веб. "
-    'В поле `platform` подставь "web".'
-)
-
-SCREEN_EXTRA = 'В поле `platform` подставь "{platform}".'
-
-
-def _tool_call(kind: str, query: str, platform: str, seen: Sequence[str]) -> str:
-    limit = LIMIT_BY_KIND[kind]
-    tool = TOOL_BY_KIND[kind]
-    if kind == "w":
-        return f'Вызови {tool} с query="{query}", limit={limit}.'
-    call = f'Вызови {tool} с query="{query}", platform="{platform}", limit={limit}'
-    if kind == "s":
-        call += ', mode="deep"'
-        if seen:
-            listed = ", ".join(f'"{i}"' for i in seen)
-            call += f", exclude_screen_ids=[{listed}]"
-    return call + "."
-
-
-def build_selection_messages(
-    kind: str,
-    platform: str,
-    query: str,
-    title: str,
-    count: int,
-    seen: Sequence[str] = (),
-) -> list[dict[str, Any]]:
-    """Запрос для подбора по выбранным в мастере атрибутам."""
-    extra = {"s": SCREEN_EXTRA, "f": FLOW_EXTRA, "w": SECTION_EXTRA}[kind]
-    prompt = SELECTION_TEMPLATE.format(
-        word=KIND_WORD[kind],
-        title=title,
-        call=_tool_call(kind, query, platform, seen),
-        count=count,
-        extra=extra.format(platform=platform),
+    return Digest(
+        day=day,
+        summary=str(data.get("summary", "")).strip(),
+        sections=sections,
     )
-    return [{"role": "user", "content": prompt}]
