@@ -59,6 +59,7 @@ class Config:
     mobbin_access_token: str
     db_path: Path
     profile_path: Path
+    image_mode: str
     timezone: str
     hour: int
     minute: int
@@ -85,6 +86,7 @@ class Config:
             profile_path=Path(
                 os.environ.get("INSPOBOT_PROFILE", str(var_dir / "profile.json"))
             ),
+            image_mode=os.environ.get("INSPOBOT_IMAGE_MODE", "photo").strip().lower(),
             timezone=os.environ.get("INSPOBOT_TZ", "Europe/Moscow").strip(),
             hour=_int("INSPOBOT_HOUR", 11),
             minute=_int("INSPOBOT_MINUTE", 0),

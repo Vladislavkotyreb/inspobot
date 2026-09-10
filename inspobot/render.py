@@ -35,6 +35,14 @@ def _clip(text: str, limit: int) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def _steps_word(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return "шаг"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return "шага"
+    return "шагов"
+
+
 def section_icon(section: Section) -> str:
     if section.slot.kind in KIND_ICON:
         return KIND_ICON[section.slot.kind]
@@ -54,10 +62,10 @@ def header_html(digest: Digest) -> str:
 
 
 def caption_html(section: Section, pick: Pick, index: int, total: int) -> str:
-    parts = [
-        f"{section_icon(section)} {escape(section.topic.title)} · {index}/{total}",
-        f"<b>{escape(pick.app_name)}</b>",
-    ]
+    head = f"{section_icon(section)} {escape(section.topic.title)} · {index}/{total}"
+    if pick.screens:
+        head += f" · {len(pick.screens)} {_steps_word(len(pick.screens))}"
+    parts = [head, f"<b>{escape(pick.app_name)}</b>"]
     if pick.pattern:
         parts.append(escape(pick.pattern))
     if pick.note:

@@ -101,3 +101,20 @@ class CaptionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FlowCaptionTest(unittest.TestCase):
+    def caption(self, screens):
+        pick = make_pick(screens=tuple(screens))
+        section = Section(PLAN[2][0], PLAN[2][1], (pick,))
+        return caption_html(section, pick, 1, 2)
+
+    def test_step_count_is_declined(self):
+        self.assertIn("1 шаг", self.caption(["https://a/1"]))
+        self.assertIn("3 шага", self.caption([f"https://a/{i}" for i in range(3)]))
+        self.assertIn("7 шагов", self.caption([f"https://a/{i}" for i in range(7)]))
+        self.assertIn("11 шагов", self.caption([f"https://a/{i}" for i in range(11)]))
+
+    def test_plain_screens_say_nothing_about_steps(self):
+        section = Section(PLAN[0][0], PLAN[0][1], (make_pick(),))
+        self.assertNotIn("шаг", caption_html(section, section.picks[0], 1, 3))

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -14,6 +15,7 @@ import httpx
 
 API_ROOT = "https://api.telegram.org"
 SEND_PAUSE = 0.6  # Telegram: не больше ~20 сообщений в минуту в один чат
+MEDIA_GROUP_LIMIT = 10  # столько картинок влезает в одну галерею
 TIMEOUT = httpx.Timeout(60.0, connect=15.0)
 
 log = logging.getLogger(__name__)
@@ -113,3 +115,36 @@ class Telegram:
             raise TelegramError(f"getUpdates: {payload.get('description')}")
         return list(payload["result"])
 
+    async def send_media_group(
+        self,
+        urls: list[str],
+        caption: str = "",
+        *,
+        as_document: bool = False,
+        chat_id: str | None = None,
+    ) -> bool:
+        """Галерея из нескольких картинок одним сообщением.
+
+        `as_document=True` отправляет исходные файлы: Telegram не сжимает их,
+        и мелкий текст на экранах остаётся читаемым. Ценой того, что вместо
+        плитки получается список вложений.
+        """
+        if not urls:
+            return False
+        kind = "document" if as_document else "photo"
+        media: list[dict[str, Any]] = []
+        for index, url in enumerate(urls[:MEDIA_GROUP_LIMIT]):
+            item: dict[str, Any] = {"type": kind, "media": url}
+            if index == 0 and caption:
+                item["caption"] = caption
+                item["parse_mode"] = "HTML"
+            media.append(item)
+        try:
+            await self._call(
+                "sendMediaGroup",
+                {"chat_id": chat_id or self.chat_id, "media": json.dumps(media)},
+            )
+            return True
+        except TelegramError as exc:
+            log.info("sendMediaGroup не прошёл (%s), шлю по одной", exc)
+            return False

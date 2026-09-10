@@ -38,10 +38,11 @@ PICK_SCHEMA: dict[str, Any] = {
         "app_name": {"type": "string"},
         "pattern": {"type": "string"},
         "note": {"type": "string"},
+        "screens": {"type": "array", "items": {"type": "string"}},
     },
     "required": [
         "slot", "platform", "screen_id", "mobbin_url", "image_url",
-        "app_name", "pattern", "note",
+        "app_name", "pattern", "note", "screens",
     ],
     "additionalProperties": False,
 }
@@ -76,6 +77,11 @@ SYSTEM_PROMPT = """\
 6. Если инструмент вернул меньше подходящего, чем просили, — верни меньше.
    Добивать слабыми вариантами нельзя.
 7. `slot` — номер блока, для которого найден результат. Не путай блоки.
+8. `screens` — только для флоу: сложи туда ссылки на превью ВСЕХ шагов
+   сценария из ответа инструмента, по порядку, ничего не пропуская. Именно
+   по ним человек поймёт, как устроен сценарий. Для отдельных экранов и
+   секций оставь пустой массив.
+9. Во всех вызовах инструментов передавай image_format="jpg".
 """
 
 DIGEST_TEMPLATE = """\
@@ -92,8 +98,13 @@ DIGEST_TEMPLATE = """\
 SECTION_TEMPLATE = """\
 Блок {index} — {title}, тема «{topic}».
 {call}
-Отбери лучшие {count}, у каждого поставь slot={index} и platform="{platform}".
+Отбери лучшие {count}, у каждого поставь slot={index} и platform="{platform}".{screens_note}
 """
+
+
+SCREENS_NOTE = (
+    "\nУ каждого флоу заполни `screens` — превью всех шагов по порядку."
+)
 
 
 class CuratorError(RuntimeError):
@@ -117,8 +128,11 @@ def _tool_call(slot: Slot, topic: Topic, seen: Sequence[str]) -> str:
     tool = TOOL_BY_KIND[slot.kind]
     limit = search_limit(slot.kind, slot.count)
     if slot.kind == "w":
-        return f'Вызови {tool} с query="{topic.query}", limit={limit}.'
-    call = f'Вызови {tool} с query="{topic.query}", platform="{slot.api_platform}", limit={limit}'
+        return f'Вызови {tool} с query="{topic.query}", limit={limit}, image_format="jpg".'
+    call = (
+        f'Вызови {tool} с query="{topic.query}", platform="{slot.api_platform}", '
+        f'limit={limit}, image_format="jpg"'
+    )
     if slot.kind == "s":
         call += ', mode="deep"'
         if seen:
@@ -143,6 +157,7 @@ def build_digest_messages(
                 call=_tool_call(slot, topic, seen_by_platform.get(slot.api_platform, ())),
                 count=slot.count,
                 platform=slot.api_platform,
+                screens_note=SCREENS_NOTE if slot.kind == "f" else "",
             )
         )
     prompt = DIGEST_TEMPLATE.format(
@@ -173,6 +188,22 @@ def is_valid_pick(pick: dict[str, Any], kind: str = "s") -> bool:
     ) and str(pick.get("image_url", "")).startswith("https://")
 
 
+MAX_FLOW_SCREENS = 24
+
+
+def _screens_from(item: dict[str, Any]) -> tuple[str, ...]:
+    """Шаги флоу: только внятные ссылки, по порядку, без повторов."""
+    raw = item.get("screens")
+    if not isinstance(raw, list):
+        return ()
+    urls: list[str] = []
+    for value in raw:
+        url = str(value).strip()
+        if url.startswith("https://") and url not in urls:
+            urls.append(url)
+    return tuple(urls[:MAX_FLOW_SCREENS])
+
+
 def _pick_from(item: dict[str, Any]) -> Pick:
     return Pick(
         platform=str(item["platform"]),
@@ -182,6 +213,7 @@ def _pick_from(item: dict[str, Any]) -> Pick:
         app_name=str(item.get("app_name", "")).strip() or "—",
         pattern=str(item.get("pattern", "")).strip(),
         note=str(item.get("note", "")).strip(),
+        screens=_screens_from(item),
     )
 
 

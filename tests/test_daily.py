@@ -18,10 +18,11 @@ DAY = date(2026, 9, 10)
 PLAN = plan_for_day(DEFAULT_PROFILE, DAY)
 
 
-def make_pick(i, platform="ios"):
+def make_pick(i, platform="ios", screens=()):
     sid = f"{i:08d}-0000-4000-8000-000000000000"
     return Pick(platform, sid, f"https://mobbin.com/screens/{sid}",
-                f"https://mobbin.com/api/mcp/short/{i}", f"App {i}", "Приём", "Заметка.")
+                f"https://mobbin.com/api/mcp/short/{i}", f"App {i}", "Приём", "Заметка.",
+                tuple(screens))
 
 
 def make_digest():
@@ -37,10 +38,12 @@ def make_digest():
 
 
 class FakeTelegram:
-    def __init__(self, token, chat_id, photo_ok=True):
+    def __init__(self, token, chat_id, photo_ok=True, group_ok=True):
         self.messages: list[str] = []
         self.photos: list[str] = []
+        self.groups: list[tuple[list[str], str, bool]] = []
         self.photo_ok = photo_ok
+        self.group_ok = group_ok
 
     async def __aenter__(self):
         return self
@@ -57,6 +60,12 @@ class FakeTelegram:
             self.photos.append(image_url)
             return True
         return False
+
+    async def send_media_group(self, urls, caption="", *, as_document=False, chat_id=None):
+        if not self.group_ok:
+            return False
+        self.groups.append((list(urls), caption, as_document))
+        return True
 
     async def pause(self):
         return None
@@ -170,3 +179,58 @@ class ShowPlanTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FLOW_STEPS = tuple(f"https://mobbin.com/api/mcp/step/{i}" for i in range(1, 15))
+
+
+class FlowDeliveryTest(unittest.TestCase):
+    """Флоу показывается всеми шагами, а не одним превью."""
+
+    def setUp(self):
+        self.section = Section(PLAN[2][0], PLAN[2][1], ())
+
+    def send(self, pick, telegram=None, as_document=False):
+        telegram = telegram or FakeTelegram("t", "42")
+        asyncio.run(
+            daily.send_pick(telegram, self.section, pick, 1, 1, None, as_document)
+        )
+        return telegram
+
+    def test_single_image_goes_as_a_plain_photo(self):
+        telegram = self.send(make_pick(1))
+        self.assertEqual(len(telegram.photos), 1)
+        self.assertEqual(telegram.groups, [])
+
+    def test_flow_steps_go_as_one_gallery(self):
+        telegram = self.send(make_pick(1, screens=FLOW_STEPS[:6]))
+        self.assertEqual(len(telegram.groups), 1)
+        urls, caption, _ = telegram.groups[0]
+        self.assertEqual(urls, list(FLOW_STEPS[:6]))
+        self.assertIn("App 1", caption)
+        self.assertEqual(telegram.photos, [])
+
+    def test_long_flow_is_split_and_captioned_once(self):
+        """В галерею Telegram влезает десять картинок, шагов бывает больше."""
+        telegram = self.send(make_pick(1, screens=FLOW_STEPS))
+        self.assertEqual(len(telegram.groups), 2)
+        self.assertEqual(len(telegram.groups[0][0]), 10)
+        self.assertEqual(len(telegram.groups[1][0]), 4)
+        self.assertNotEqual(telegram.groups[0][1], "")
+        self.assertEqual(telegram.groups[1][1], "")
+
+    def test_document_mode_is_passed_through(self):
+        telegram = self.send(make_pick(1, screens=FLOW_STEPS[:3]), as_document=True)
+        self.assertTrue(telegram.groups[0][2])
+
+    def test_falls_back_to_single_photos_when_gallery_fails(self):
+        telegram = FakeTelegram("t", "42", group_ok=False)
+        self.send(make_pick(1, screens=FLOW_STEPS[:4]), telegram)
+        self.assertEqual(telegram.photos, list(FLOW_STEPS[:4]))
+        self.assertEqual(telegram.messages, [])
+
+    def test_text_survives_when_nothing_can_be_shown(self):
+        telegram = FakeTelegram("t", "42", photo_ok=False, group_ok=False)
+        self.send(make_pick(1, screens=FLOW_STEPS[:3]), telegram)
+        self.assertEqual(len(telegram.messages), 1)
+        self.assertIn("Открыть на Mobbin", telegram.messages[0])

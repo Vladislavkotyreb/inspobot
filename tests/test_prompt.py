@@ -17,8 +17,9 @@ UUID_A = "ed0c23e4-d2c7-428f-bf9c-d6efd38d7f47"
 UUID_B = "2051c35c-fef5-4bd9-b8ad-a00c38ff9189"
 
 
-def pick(slot=1, screen_id=UUID_A, platform="ios", **over):
+def pick(slot=1, screen_id=UUID_A, platform="ios", screens=None, **over):
     base = {
+        "screens": list(screens or []),
         "slot": slot,
         "platform": platform,
         "screen_id": screen_id,
@@ -159,3 +160,50 @@ class ParseDigestTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FlowScreensTest(unittest.TestCase):
+    """Шаги флоу приходят списком ссылок — их надо принять и почистить."""
+
+    def flow_slot(self):
+        return next(i for i, (slot, _) in enumerate(PLAN, start=1) if slot.kind == "f")
+
+    def parse_flow(self, screens):
+        index = self.flow_slot()
+        payload = {
+            "summary": "",
+            "picks": [pick(index, "flow-1", "ios", screens=screens)],
+        }
+        return parse_digest(json.dumps(payload), DAY, PLAN).picks[0]
+
+    def test_steps_are_kept_in_order(self):
+        steps = ["https://a/1", "https://a/2", "https://a/3"]
+        self.assertEqual(list(self.parse_flow(steps).screens), steps)
+
+    def test_duplicates_and_junk_are_dropped(self):
+        got = self.parse_flow(["https://a/1", "https://a/1", "не ссылка", "", "http://a/2"])
+        self.assertEqual(list(got.screens), ["https://a/1"])
+
+    def test_absurdly_long_lists_are_capped(self):
+        got = self.parse_flow([f"https://a/{i}" for i in range(100)])
+        self.assertEqual(len(got.screens), 24)
+
+    def test_missing_field_is_not_an_error(self):
+        index = self.flow_slot()
+        item = pick(index, "flow-1", "ios")
+        item.pop("screens", None)
+        digest = parse_digest(json.dumps({"summary": "", "picks": [item]}), DAY, PLAN)
+        self.assertEqual(digest.picks[0].screens, ())
+
+    def test_images_falls_back_to_the_single_preview(self):
+        index = self.flow_slot()
+        got = parse_digest(
+            json.dumps({"summary": "", "picks": [pick(index, "flow-1", "ios", screens=[])]}),
+            DAY, PLAN,
+        ).picks[0]
+        self.assertEqual(got.images, (got.image_url,))
+
+    def test_flow_blocks_are_asked_for_all_steps(self):
+        text = build_digest_messages(DAY, PLAN)[0]["content"]
+        self.assertIn("`screens`", text)
+        self.assertIn('image_format="jpg"', text)

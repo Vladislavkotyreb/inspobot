@@ -20,6 +20,14 @@ class Pick:
     app_name: str
     pattern: str
     note: str
+    # Шаги сценария для флоу: превью каждого экрана по порядку. У отдельных
+    # экранов и секций пусто — там показывать нечего, кроме самой картинки.
+    screens: tuple[str, ...] = ()
+
+    @property
+    def images(self) -> tuple[str, ...]:
+        """Всё, что нужно показать: у флоу — все шаги, у остального — одна."""
+        return self.screens or (self.image_url,)
 
 
 @dataclass(frozen=True)
