@@ -62,7 +62,8 @@ Telegram, ключ Anthropic и токен Mobbin по отдельности и
 
 ## Требования
 
-- Python 3.11+
+- Python 3.11+ (на macOS системный `python3` — 3.9, на нём `anthropic` не
+  ставится вовсе: `brew install python@3.12`)
 - подписка Mobbin **Pro** и выше (MCP на бесплатном тарифе не работает)
 - ключ [Anthropic API](https://console.anthropic.com)
 - бот в Telegram от [@BotFather](https://t.me/BotFather)

@@ -8,11 +8,20 @@
 
 ```bash
 ssh USER@СЕРВЕР
+python3 --version        # нужен 3.11+; SDK anthropic не ставится на 3.9
 git clone https://github.com/Vladislavkotyreb/inspobot /opt/inspobot
 cd /opt/inspobot
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+.venv/bin/python --version
 ```
+
+Если `python3` оказался старым, поставьте новый и соберите окружение им:
+на macOS `brew install python@3.12`, затем
+`"$(brew --prefix)/bin/python3.12" -m venv .venv`; на Debian/Ubuntu
+`apt install python3.12-venv`, затем `python3.12 -m venv .venv`. Признак того,
+что этот шаг пропущен, — `ModuleNotFoundError: No module named 'httpx'`:
+pip не смог поставить anthropic и не поставил вообще ничего.
 
 На ISPmanager каталог обычно живёт в `/var/www/USER/data/inspobot` — путь
 подставьте свой, дальше по тексту он везде `/opt/inspobot`.
