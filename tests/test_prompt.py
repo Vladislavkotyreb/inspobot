@@ -220,3 +220,30 @@ class FlowScreensTest(unittest.TestCase):
         text = build_digest_messages(DAY, PLAN)[0]["content"]
         self.assertIn("`screens`", text)
         self.assertIn('image_format="jpg"', text)
+
+
+class ScoreTest(unittest.TestCase):
+    def parse_score(self, value):
+        item = pick(1)
+        if value is None:
+            item.pop("score", None)
+        else:
+            item["score"] = value
+        return parse_digest(json.dumps({"summary": "", "picks": [item]}), DAY, PLAN).picks[0].score
+
+    def test_score_is_kept(self):
+        self.assertEqual(self.parse_score(9), 9)
+
+    def test_score_is_clamped_to_the_scale(self):
+        self.assertEqual(self.parse_score(0), 1)
+        self.assertEqual(self.parse_score(42), 10)
+
+    def test_junk_becomes_the_middle(self):
+        self.assertEqual(self.parse_score("много"), 5)
+        self.assertEqual(self.parse_score(None), 5)
+
+    def test_schema_requires_a_score(self):
+        from inspobot.prompt import PICK_SCHEMA
+
+        self.assertIn("score", PICK_SCHEMA["required"])
+        self.assertEqual(PICK_SCHEMA["properties"]["score"]["maximum"], 10)

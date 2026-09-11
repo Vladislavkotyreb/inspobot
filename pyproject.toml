@@ -13,6 +13,7 @@ inspobot-daily = "inspobot.daily:main"
 inspobot-setup = "inspobot.setup_cli:main"
 inspobot-auth = "inspobot.auth_cli:main"
 inspobot-doctor = "inspobot.doctor:main"
+inspobot-top = "inspobot.top:main"
 
 [build-system]
 requires = ["setuptools>=68"]

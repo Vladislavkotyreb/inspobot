@@ -61,6 +61,7 @@ class Config:
     profile_path: Path
     chats_path: Path
     image_mode: str
+    top_buttons: bool
     timezone: str
     hour: int
     minute: int
@@ -89,6 +90,7 @@ class Config:
             ),
             chats_path=Path(os.environ.get("INSPOBOT_CHATS", str(var_dir / "chats.txt"))),
             image_mode=os.environ.get("INSPOBOT_IMAGE_MODE", "document").strip().lower(),
+            top_buttons=_bool("INSPOBOT_TOP_BUTTONS", False),
             timezone=os.environ.get("INSPOBOT_TZ", "Europe/Moscow").strip(),
             hour=_int("INSPOBOT_HOUR", 11),
             minute=_int("INSPOBOT_MINUTE", 0),

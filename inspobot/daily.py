@@ -28,10 +28,10 @@ from . import chats as chats_file
 from .profile import WEEKDAY_NAMES, Day, ProfileError, Slot
 from .profile import load as load_schedule
 from .profile import plan_for_day
-from .render import caption_html, header_html, pick_keyboard
+from .render import caption_html, digest_keyboard, header_html, pick_keyboard
 from .setup_cli import describe
 from .state import SeenScreen, Store
-from .telegram import MEDIA_GROUP_LIMIT, Telegram, TelegramError
+from .telegram import MEDIA_GROUP_LIMIT, Telegram, TelegramError, _message_id
 
 log = logging.getLogger("inspobot")
 
@@ -49,11 +49,15 @@ async def _one_by_one(
     urls: Sequence[str],
     chat_id: str | None,
     as_document: bool,
-) -> None:
+) -> list[int]:
     """Запасной путь, когда галерея не ушла: по одному файлу."""
+    ids: list[int] = []
     for url in urls:
         await telegram.pause()
-        await telegram.send_media(url, "", as_document=as_document, chat_id=chat_id)
+        mid = await telegram.send_media(url, "", as_document=as_document, chat_id=chat_id)
+        if mid is not None:
+            ids.append(mid)
+    return ids
 
 
 async def send_pick(
@@ -64,34 +68,44 @@ async def send_pick(
     total: int,
     chat_id: str | None,
     as_document: bool,
-) -> None:
+) -> list[int]:
+    """Отправить находку. Возвращает номера сообщений — первым идёт то, что с
+    подписью и кнопкой, дальше шаги галереи. По ним топ потом копирует
+    находку, не перекачивая файлы."""
     caption = caption_html(section, pick, index, total)
     keyboard = pick_keyboard(pick)
     images = pick.images
+    ids: list[int] = []
 
     if len(images) == 1:
         await telegram.pause()
-        ok = await telegram.send_media(
+        mid = await telegram.send_media(
             images[0], caption, as_document=as_document, keyboard=keyboard, chat_id=chat_id
         )
-        if not ok:
+        if mid is None:
             # Файл не дошёл — текст с кнопкой всё равно нужен.
-            await telegram.send_message(caption, chat_id=chat_id, keyboard=keyboard)
-        return
+            mid = _message_id(
+                await telegram.send_message(caption, chat_id=chat_id, keyboard=keyboard)
+            )
+        return [mid] if mid is not None else []
 
     # Флоу. Подпись с кнопкой уходит отдельным сообщением перед галереей:
     # sendMediaGroup не принимает reply_markup, кнопку к нему не прицепить.
     await telegram.pause()
-    await telegram.send_message(caption, chat_id=chat_id, keyboard=keyboard)
+    mid = _message_id(await telegram.send_message(caption, chat_id=chat_id, keyboard=keyboard))
+    if mid is not None:
+        ids.append(mid)
 
     # Все шаги галереей. В одну влезает десять, длинные сценарии разбиваются.
     for chunk in _chunks(images, MEDIA_GROUP_LIMIT):
         await telegram.pause()
-        ok = await telegram.send_media_group(
+        got = await telegram.send_media_group(
             chunk, "", as_document=as_document, chat_id=chat_id
         )
-        if not ok:
-            await _one_by_one(telegram, chunk, chat_id, as_document)
+        if not got:
+            got = await _one_by_one(telegram, chunk, chat_id, as_document)
+        ids.extend(got)
+    return ids
 
 
 async def send_section(
@@ -99,11 +113,15 @@ async def send_section(
     section: Section,
     chat_id: str | None = None,
     as_document: bool = False,
-) -> int:
+) -> dict[str, list[int]]:
+    """Номера сообщений по каждой находке блока, ключ — screen_id."""
     total = len(section.picks)
+    delivered: dict[str, list[int]] = {}
     for index, pick in enumerate(section.picks, start=1):
-        await send_pick(telegram, section, pick, index, total, chat_id, as_document)
-    return total
+        delivered[pick.screen_id] = await send_pick(
+            telegram, section, pick, index, total, chat_id, as_document
+        )
+    return delivered
 
 
 async def deliver(
@@ -111,12 +129,18 @@ async def deliver(
     digest: Digest,
     chat_id: str | None = None,
     as_document: bool = False,
-) -> int:
-    await telegram.send_message(header_html(digest), chat_id=chat_id)
-    sent = 0
+    top_buttons: bool = False,
+) -> dict[str, list[int]]:
+    """Вся подборка в один чат. Возвращает номера сообщений по находкам."""
+    await telegram.send_message(
+        header_html(digest),
+        chat_id=chat_id,
+        keyboard=digest_keyboard() if top_buttons else None,
+    )
+    delivered: dict[str, list[int]] = {}
     for section in digest.sections:
-        sent += await send_section(telegram, section, chat_id, as_document)
-    return sent
+        delivered.update(await send_section(telegram, section, chat_id, as_document))
+    return delivered
 
 
 async def build_digest(
@@ -150,18 +174,59 @@ def recipients(config: Config, only: str | None = None) -> tuple[str, ...]:
     return chats_file.load(config.chats_path, config.telegram_chat_id)
 
 
+def remember_picks(store: Store, digest: Digest) -> dict[str, int]:
+    """Записать находки с оценками; вернуть id по screen_id."""
+    ids: dict[str, int] = {}
+    for section in digest.sections:
+        for pick in section.picks:
+            ids[pick.screen_id] = store.record_pick(
+                day=digest.day,
+                kind=section.slot.kind,
+                platform=pick.platform,
+                screen_id=pick.screen_id,
+                app_name=pick.app_name,
+                pattern=pick.pattern,
+                note=pick.note,
+                mobbin_url=pick.mobbin_url,
+                topic=section.topic.title,
+                block=section.slot.title(),
+                score=pick.score,
+            )
+    return ids
+
+
 async def broadcast(
-    telegram: Telegram, digest: Digest, targets: Sequence[str], as_document: bool
+    telegram: Telegram,
+    digest: Digest,
+    targets: Sequence[str],
+    as_document: bool,
+    *,
+    store: Store | None = None,
+    pick_ids: dict[str, int] | None = None,
+    top_buttons: bool = False,
 ) -> tuple[int, list[str]]:
-    """Одна и та же подборка во все чаты. Упавший чат не роняет рассылку."""
+    """Одна и та же подборка во все чаты. Упавший чат не роняет рассылку.
+
+    Если передан `store`, номера сообщений каждой находки запоминаются
+    по чатам — из них потом собирается топ.
+    """
     sent = 0
     failed: list[str] = []
     for target in targets:
         try:
-            sent += await deliver(telegram, digest, chat_id=target, as_document=as_document)
+            delivered = await deliver(
+                telegram, digest, chat_id=target, as_document=as_document,
+                top_buttons=top_buttons,
+            )
         except TelegramError as exc:
             log.warning("Чат %s не получил подборку: %s", target, exc)
             failed.append(target)
+            continue
+        sent += len(delivered)
+        if store is not None and pick_ids:
+            for screen_id, message_ids in delivered.items():
+                if screen_id in pick_ids:
+                    store.record_delivery(pick_ids[screen_id], target, message_ids)
     return sent, failed
 
 
@@ -219,9 +284,16 @@ async def run_once(
             f"{config.chats_path}"
         )
 
+    pick_ids = remember_picks(store, digest)
     async with Telegram(config.telegram_token, config.telegram_chat_id) as tg:
         sent, failed = await broadcast(
-            tg, digest, targets, config.image_mode == "document"
+            tg,
+            digest,
+            targets,
+            config.image_mode == "document",
+            store=store,
+            pick_ids=pick_ids,
+            top_buttons=config.top_buttons,
         )
         if len(failed) == len(targets):
             error = f"ни один из {len(targets)} чатов не принял подборку"

@@ -8,14 +8,23 @@ on:
     - cron: "7 8 * * *"
   workflow_dispatch:
     inputs:
+      mode:
+        description: Что делать
+        type: choice
+        options: [digest, top-week, top-month]
+        default: digest
       force:
-        description: Отправить, даже если сегодня уже слали
+        description: Дайджест — отправить, даже если сегодня уже слали
         type: boolean
         default: false
       dry_run:
-        description: Только показать в логе, ничего не отправлять
+        description: Дайджест — только показать в логе, ничего не отправлять
         type: boolean
         default: false
+  # Кнопки «Топ-10» в чате: ретранслятор (deploy/cloudflare-worker.js)
+  # превращает нажатие в это событие. См. docs/TOP.md.
+  repository_dispatch:
+    types: [top-week, top-month]
 
 permissions:
   contents: read
@@ -23,6 +32,13 @@ permissions:
 concurrency:
   group: digest
   cancel-in-progress: false
+
+env:
+  INSPOBOT_TZ: ${{ vars.INSPOBOT_TZ || 'Europe/Moscow' }}
+  INSPOBOT_PROFILE: config/profile.json
+  INSPOBOT_CHATS: var/chats.txt
+  INSPOBOT_DB: var/inspobot.sqlite3
+  MOBBIN_TOKEN_FILE: var/mobbin_token.json
 
 jobs:
   digest:
@@ -35,6 +51,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Определить режим
+        id: mode
+        run: |
+          MODE="${{ inputs.mode }}"
+          if [ -n "${{ github.event.action }}" ]; then
+            MODE="${{ github.event.action }}"
+          fi
+          if [ -z "$MODE" ]; then
+            MODE="digest"
+          fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "chat=${{ github.event.client_payload.chat_id }}" >> "$GITHUB_OUTPUT"
+          echo "Режим: $MODE"
 
       - name: Кэш памяти о показанном
         uses: actions/cache@v4
@@ -57,19 +87,23 @@ jobs:
         run: |
           set -e
           mkdir -p var
+          if [ -n "$TELEGRAM_CHAT_IDS" ]; then
+            printf '%s\n' "$TELEGRAM_CHAT_IDS" > var/chats.txt
+          fi
+          if [ "${{ steps.mode.outputs.mode }}" != "digest" ]; then
+            exit 0   # топу Mobbin не нужен
+          fi
           if [ -z "$MOBBIN_TOKEN_JSON" ]; then
             echo "::error::Нет секрета MOBBIN_TOKEN_JSON — см. docs/GITHUB_ACTIONS.md"
             exit 1
           fi
           printf '%s' "$MOBBIN_TOKEN_JSON" > var/mobbin_token.json
           chmod 600 var/mobbin_token.json
-          if [ -n "$TELEGRAM_CHAT_IDS" ]; then
-            printf '%s\n' "$TELEGRAM_CHAT_IDS" > var/chats.txt
-          fi
           # Запоминаем, каким токен пришёл: после запуска сравним.
           sha256sum var/mobbin_token.json | cut -d' ' -f1 > var/token.sha
 
       - name: Собрать и отправить
+        if: steps.mode.outputs.mode == 'digest'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_WORKSPACE_ID: ${{ secrets.ANTHROPIC_WORKSPACE_ID }}
@@ -78,11 +112,7 @@ jobs:
           ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-5' }}
           INSPOBOT_EFFORT: ${{ vars.INSPOBOT_EFFORT || 'medium' }}
           INSPOBOT_IMAGE_MODE: ${{ vars.INSPOBOT_IMAGE_MODE || 'document' }}
-          INSPOBOT_TZ: ${{ vars.INSPOBOT_TZ || 'Europe/Moscow' }}
-          INSPOBOT_PROFILE: config/profile.json
-          INSPOBOT_CHATS: var/chats.txt
-          MOBBIN_TOKEN_FILE: var/mobbin_token.json
-          INSPOBOT_DB: var/inspobot.sqlite3
+          INSPOBOT_TOP_BUTTONS: ${{ vars.INSPOBOT_TOP_BUTTONS || '0' }}
         run: |
           # Не «[ … ] && …»: GitHub запускает шаг через bash -e, и ложное
           # условие в последней строке уронило бы шаг с кодом 1.
@@ -95,10 +125,25 @@ jobs:
           fi
           python -m inspobot.daily --verbose $ARGS
 
+      - name: Топ за период
+        if: startsWith(steps.mode.outputs.mode, 'top-')
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Ни Claude, ни Mobbin здесь не трогаются: всё из базы и копий сообщений.
+          PERIOD="--${{ steps.mode.outputs.mode }}"
+          PERIOD="${PERIOD#--top-}"
+          ARGS="--$PERIOD"
+          if [ -n "${{ steps.mode.outputs.chat }}" ]; then
+            ARGS="$ARGS --chat ${{ steps.mode.outputs.chat }}"
+          fi
+          python -m inspobot.top --verbose $ARGS
+
       - name: Сохранить обновлённый токен Mobbin
         # Даже если отправка упала: токен мог обновиться до сбоя, и потерять
         # его — значит завтра остаться без доступа.
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'digest'
         env:
           GH_SECRETS_TOKEN: ${{ secrets.GH_SECRETS_TOKEN }}
         run: |

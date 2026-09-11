@@ -9,6 +9,7 @@ from datetime import date
 from html import escape
 
 from .models import Digest, Pick, Section
+from .state import StoredPick
 
 MONTHS_GENITIVE = (
     "января", "февраля", "марта", "апреля", "мая", "июня",
@@ -80,6 +81,49 @@ def caption_html(section: Section, pick: Pick, index: int, total: int) -> str:
 OPEN_LABEL = "Открыть на Mobbin"
 
 
-def pick_keyboard(pick: Pick) -> dict:
+def pick_keyboard(pick: "Pick | StoredPick") -> dict:
     """Кнопка под находкой вместо ссылки в тексте."""
     return {"inline_keyboard": [[{"text": OPEN_LABEL, "url": pick.mobbin_url}]]}
+
+
+# --- топ за период ----------------------------------------------------------
+
+TOP_WEEK = "top:week"
+TOP_MONTH = "top:month"
+PERIOD_LABEL = {"week": "за неделю", "month": "за месяц"}
+
+
+def digest_keyboard() -> dict:
+    """Две кнопки под шапкой дайджеста. Это callback-кнопки: без
+    ретранслятора, который принимает нажатия, они ничего не сделают —
+    поэтому добавляются только при INSPOBOT_TOP_BUTTONS=1."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Топ-10 за неделю", "callback_data": TOP_WEEK},
+                {"text": "Топ-10 за месяц", "callback_data": TOP_MONTH},
+            ]
+        ]
+    }
+
+
+def top_header_html(period: str, since: date, until: date, count: int) -> str:
+    label = PERIOD_LABEL.get(period, period)
+    head = f"<b>Топ-{count} {escape(label)}</b>"
+    span = f"{escape(human_date(since))} — {escape(human_date(until))}"
+    if count == 0:
+        return f"{head}\n\nЗа {span} ничего не присылалось — топ пуст."
+    return f"{head}\n{span}\n\nЛучшее из того, что уже было в подборках — по оценке в момент отбора."
+
+
+def top_caption_html(rank: int, pick: StoredPick) -> str:
+    parts = [
+        f"<b>#{rank}</b> · {pick.score}/10 · {escape(pick.topic or pick.block)}",
+        f"<b>{escape(pick.app_name)}</b>",
+    ]
+    if pick.pattern:
+        parts.append(escape(pick.pattern))
+    if pick.note:
+        parts.append(escape(pick.note))
+    parts.append(f"<i>{escape(human_date(pick.day))}</i>")
+    return _clip("\n".join(parts), CAPTION_LIMIT)

@@ -39,10 +39,11 @@ PICK_SCHEMA: dict[str, Any] = {
         "pattern": {"type": "string"},
         "note": {"type": "string"},
         "screens": {"type": "array", "items": {"type": "string"}},
+        "score": {"type": "integer", "minimum": 1, "maximum": 10},
     },
     "required": [
         "slot", "platform", "screen_id", "mobbin_url", "image_url",
-        "app_name", "pattern", "note", "screens",
+        "app_name", "pattern", "note", "screens", "score",
     ],
     "additionalProperties": False,
 }
@@ -82,6 +83,11 @@ SYSTEM_PROMPT = """\
    по ним человек поймёт, как устроен сценарий. Для отдельных экранов и
    секций оставь пустой массив.
 9. Во всех вызовах инструментов передавай image_format="jpg".
+10. `score` — насколько находка примечательна, от 1 до 10. Это не «нравится
+    ли», а «стоит ли к этому вернуться через месяц»: 9–10 — редкий приём,
+    который хочется утащить в свой проект; 5–6 — добротно, но встречается
+    везде; 1–3 — попало в подборку за неимением лучшего. Не ставь всем
+    одинаково: по этим оценкам потом собирается топ за неделю и месяц.
 """
 
 DIGEST_TEMPLATE = """\
@@ -189,6 +195,16 @@ def is_valid_pick(pick: dict[str, Any], kind: str = "s") -> bool:
 
 
 MAX_FLOW_SCREENS = 24
+DEFAULT_SCORE = 5
+
+
+def _score_from(item: dict[str, Any]) -> int:
+    """Оценка 1–10; всё невнятное превращается в середину шкалы."""
+    try:
+        value = int(item.get("score", DEFAULT_SCORE))
+    except (TypeError, ValueError):
+        return DEFAULT_SCORE
+    return max(1, min(10, value))
 
 
 def _screens_from(item: dict[str, Any]) -> tuple[str, ...]:
@@ -214,6 +230,7 @@ def _pick_from(item: dict[str, Any]) -> Pick:
         pattern=str(item.get("pattern", "")).strip(),
         note=str(item.get("note", "")).strip(),
         screens=_screens_from(item),
+        score=_score_from(item),
     )
 
 

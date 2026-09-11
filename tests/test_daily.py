@@ -35,11 +35,11 @@ PLAN = plan_for_day(SCHEDULE, MONDAY)[1]
 FLOW_STEPS = tuple(f"https://mobbin.com/api/mcp/step/{i}" for i in range(1, 15))
 
 
-def make_pick(i, platform="ios", screens=()):
+def make_pick(i, platform="ios", screens=(), score=7):
     sid = f"{i:08d}-0000-4000-8000-000000000000"
     return Pick(platform, sid, f"https://mobbin.com/screens/{sid}",
                 f"https://mobbin.com/api/mcp/short/{i}", f"App {i}", "Приём", "Заметка.",
-                tuple(screens))
+                tuple(screens), score)
 
 
 def make_digest():
@@ -60,9 +60,16 @@ class FakeTelegram:
         self.messages: list[tuple[str, str | None, dict | None]] = []
         self.media: list[tuple[str, str | None, bool, dict | None]] = []
         self.groups: list[tuple[list[str], str, bool]] = []
+        self.copies: list[tuple[str, int, str | None, dict | None]] = []
+        self.group_copies: list[tuple[str, list[int]]] = []
         self.media_ok = media_ok
         self.group_ok = group_ok
         self.failing = set(failing)
+        self._next_id = 100
+
+    def _mid(self) -> int:
+        self._next_id += 1
+        return self._next_id
 
     @property
     def photos(self):
@@ -81,22 +88,32 @@ class FakeTelegram:
     async def send_message(self, text, chat_id=None, keyboard=None):
         self._guard(chat_id)
         self.messages.append((text, chat_id, keyboard))
-        return {}
+        return {"message_id": self._mid()}
 
     async def send_media(
         self, image_url, caption, *, as_document=False, keyboard=None, chat_id=None
     ):
         self._guard(chat_id)
         if not self.media_ok:
-            return False
+            return None
         self.media.append((image_url, chat_id, as_document, keyboard))
-        return True
+        return self._mid()
 
     async def send_media_group(self, urls, caption="", *, as_document=False, chat_id=None):
         self._guard(chat_id)
         if not self.group_ok:
-            return False
+            return []
         self.groups.append((list(urls), caption, as_document))
+        return [self._mid() for _ in urls]
+
+    async def copy_message(self, from_chat_id, message_id, *, to_chat_id, caption=None, keyboard=None):
+        self._guard(to_chat_id)
+        self.copies.append((to_chat_id, message_id, caption, keyboard))
+        return True
+
+    async def copy_messages(self, from_chat_id, message_ids, *, to_chat_id):
+        self._guard(to_chat_id)
+        self.group_copies.append((to_chat_id, list(message_ids)))
         return True
 
     async def pause(self):
@@ -190,6 +207,39 @@ class RunOnceTest(unittest.TestCase):
                 asyncio.run(daily.run_once(self.config, day=MONDAY))
         self.assertIn("Mobbin молчит", telegram.messages[0][0])
         self.assertFalse(Store(self.config.db_path).sent_today(MONDAY))
+
+
+class RecordingTest(RunOnceTest):
+    def test_every_pick_is_stored_with_its_score(self):
+        self._run(FakeTelegram())
+        store = Store(self.config.db_path)
+        top = store.top(MONDAY, MONDAY, limit=10)
+        self.assertEqual(len(top), 4)
+        self.assertTrue(all(p.score == 7 for p in top))
+
+    def test_message_ids_are_remembered_per_chat(self):
+        telegram = FakeTelegram()
+        self._run(telegram)
+        store = Store(self.config.db_path)
+        picks = {p.screen_id: p for p in store.top(MONDAY, MONDAY, limit=10)}
+        single = store.delivery(picks[make_pick(1).screen_id].id, "42")
+        self.assertEqual(len(single), 1)
+        flow = store.delivery(picks[make_pick(4).screen_id].id, "42")
+        # подпись + пять шагов галереи
+        self.assertEqual(len(flow), 6)
+
+    def test_no_top_buttons_unless_enabled(self):
+        telegram = FakeTelegram()
+        self._run(telegram)
+        header_keyboard = telegram.messages[0][2]
+        self.assertIsNone(header_keyboard)
+
+    def test_top_buttons_when_enabled(self):
+        self.config = Config(**{**self.config.__dict__, "top_buttons": True})
+        telegram = FakeTelegram()
+        self._run(telegram)
+        rows = telegram.messages[0][2]["inline_keyboard"]
+        self.assertEqual([b["callback_data"] for b in rows[0]], ["top:week", "top:month"])
 
 
 class BroadcastTest(RunOnceTest):

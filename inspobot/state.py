@@ -1,11 +1,15 @@
-"""Состояние бота в SQLite: что уже присылали и когда.
+"""Состояние бота в SQLite: что уже присылали, когда и куда.
 
-Нужно для двух вещей: не повторять один и тот же экран (Mobbin умеет исключать
-по id) и не слать вторую подборку, если cron дёрнул задачу дважды.
+Три задачи. Не повторять один и тот же экран (Mobbin умеет исключать по id).
+Не слать вторую подборку, если cron дёрнул задачу дважды. И помнить каждую
+находку с её оценкой и номерами сообщений в чатах — из этого собирается
+«топ за неделю» без единого обращения к API: Telegram копирует уже
+отправленные сообщения, картинки не перекачиваются.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
@@ -32,6 +36,30 @@ CREATE TABLE IF NOT EXISTS runs (
     error      TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_day ON runs(day);
+
+CREATE TABLE IF NOT EXISTS picks (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    day        TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    platform   TEXT NOT NULL,
+    screen_id  TEXT NOT NULL,
+    app_name   TEXT,
+    pattern    TEXT,
+    note       TEXT,
+    mobbin_url TEXT NOT NULL,
+    topic      TEXT,
+    block      TEXT,
+    score      INTEGER NOT NULL DEFAULT 5,
+    UNIQUE(day, screen_id)
+);
+CREATE INDEX IF NOT EXISTS picks_day_score ON picks(day DESC, score DESC);
+
+CREATE TABLE IF NOT EXISTS deliveries (
+    pick_id     INTEGER NOT NULL REFERENCES picks(id),
+    chat_id     TEXT NOT NULL,
+    message_ids TEXT NOT NULL,
+    PRIMARY KEY (pick_id, chat_id)
+);
 """
 
 
@@ -41,6 +69,24 @@ class SeenScreen:
     platform: str
     app_name: str
     mobbin_url: str
+
+
+@dataclass(frozen=True)
+class StoredPick:
+    """Находка, как она лежит в базе: то, что нужно для топа."""
+
+    id: int
+    day: date
+    kind: str
+    platform: str
+    screen_id: str
+    app_name: str
+    pattern: str
+    note: str
+    mobbin_url: str
+    topic: str
+    block: str
+    score: int
 
 
 class Store:
@@ -124,3 +170,100 @@ class Store:
                 (1 if ok else 0, picks, error[:2000], run_id),
             )
             conn.commit()
+
+    # --- находки и доставки --------------------------------------------------
+
+    def record_pick(
+        self,
+        *,
+        day: date,
+        kind: str,
+        platform: str,
+        screen_id: str,
+        app_name: str,
+        pattern: str,
+        note: str,
+        mobbin_url: str,
+        topic: str,
+        block: str,
+        score: int,
+    ) -> int:
+        """Запомнить находку; повтор в тот же день возвращает прежний id."""
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO picks(day, kind, platform, screen_id, app_name, "
+                "pattern, note, mobbin_url, topic, block, score) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (day.isoformat(), kind, platform, screen_id, app_name, pattern, note,
+                 mobbin_url, topic, block, score),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT id FROM picks WHERE day = ? AND screen_id = ?",
+                (day.isoformat(), screen_id),
+            ).fetchone()
+        return int(row["id"])
+
+    def record_delivery(self, pick_id: int, chat_id: str, message_ids: Sequence[int]) -> None:
+        if not message_ids:
+            return
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO deliveries(pick_id, chat_id, message_ids) "
+                "VALUES (?, ?, ?)",
+                (pick_id, chat_id, json.dumps([int(m) for m in message_ids])),
+            )
+            conn.commit()
+
+    def delivery(self, pick_id: int, chat_id: str) -> list[int]:
+        """Номера сообщений, которыми находка ушла в этот чат. Пусто — не уходила."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT message_ids FROM deliveries WHERE pick_id = ? AND chat_id = ?",
+                (pick_id, chat_id),
+            ).fetchone()
+        if row is None:
+            return []
+        try:
+            return [int(m) for m in json.loads(row["message_ids"])]
+        except (ValueError, TypeError):
+            return []
+
+    def top(self, since: date, until: date, limit: int = 10) -> list[StoredPick]:
+        """Лучшее за период: по оценке, при равной — более свежее.
+
+        Одно приложение — один раз: топ из пяти экранов Duolingo никому не
+        интересен, даже если все они на девятку.
+        """
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM picks WHERE day >= ? AND day <= ? "
+                "ORDER BY score DESC, day DESC, id DESC",
+                (since.isoformat(), until.isoformat()),
+            ).fetchall()
+        chosen: list[StoredPick] = []
+        apps: set[str] = set()
+        for row in rows:
+            app = (row["app_name"] or "").strip().lower()
+            if app and app in apps:
+                continue
+            apps.add(app)
+            chosen.append(
+                StoredPick(
+                    id=int(row["id"]),
+                    day=date.fromisoformat(row["day"]),
+                    kind=row["kind"],
+                    platform=row["platform"],
+                    screen_id=row["screen_id"],
+                    app_name=row["app_name"] or "—",
+                    pattern=row["pattern"] or "",
+                    note=row["note"] or "",
+                    mobbin_url=row["mobbin_url"],
+                    topic=row["topic"] or "",
+                    block=row["block"] or "",
+                    score=int(row["score"]),
+                )
+            )
+            if len(chosen) >= limit:
+                break
+        return chosen

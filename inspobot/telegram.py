@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import Any, Sequence
 
 import httpx
 
@@ -23,6 +23,15 @@ log = logging.getLogger(__name__)
 
 class TelegramError(RuntimeError):
     pass
+
+
+def _message_id(result: Any) -> int | None:
+    if isinstance(result, dict):
+        try:
+            return int(result["message_id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+    return None
 
 
 class Telegram:
@@ -84,15 +93,16 @@ class Telegram:
         as_document: bool = False,
         keyboard: dict[str, Any] | None = None,
         chat_id: str | None = None,
-    ) -> bool:
+    ) -> int | None:
         """Одна картинка: файлом или фотографией, с кнопками под ней.
 
         `as_document=True` шлёт исходный файл — Telegram его не сжимает, и
         мелкий текст на экране остаётся читаемым.
 
         Сначала пробуем отдать ссылку Telegram, потом качаем сами. Возвращает
-        False, если доставить не вышло, — вызывающий код тогда шлёт тот же
-        текст без изображения.
+        номер отправленного сообщения — он нужен, чтобы потом скопировать его
+        в топ, — или None, если доставить не вышло: вызывающий код тогда шлёт
+        тот же текст без изображения.
         """
         method = "sendDocument" if as_document else "sendPhoto"
         field = "document" if as_document else "photo"
@@ -105,8 +115,8 @@ class Telegram:
             base["reply_markup"] = json.dumps(keyboard)
 
         try:
-            await self._call(method, {**base, field: image_url})
-            return True
+            result = await self._call(method, {**base, field: image_url})
+            return _message_id(result)
         except TelegramError as exc:
             log.info("%s по ссылке не прошёл (%s), качаю сам", method, exc)
 
@@ -115,15 +125,15 @@ class Telegram:
             blob.raise_for_status()
             content_type = blob.headers.get("content-type", "image/jpeg")
             suffix = "webp" if "webp" in content_type else "jpg"
-            await self._call(
+            result = await self._call(
                 method,
                 base,
                 files={field: (f"screen.{suffix}", blob.content, content_type)},
             )
-            return True
+            return _message_id(result)
         except (httpx.HTTPError, TelegramError) as exc:
             log.warning("Не удалось отправить %s: %s", image_url, exc)
-            return False
+            return None
 
     async def pause(self) -> None:
         await asyncio.sleep(SEND_PAUSE)
@@ -146,8 +156,11 @@ class Telegram:
         *,
         as_document: bool = False,
         chat_id: str | None = None,
-    ) -> bool:
+    ) -> list[int]:
         """Галерея из нескольких картинок одним сообщением.
+
+        Возвращает номера сообщений галереи (по одному на картинку); пустой
+        список — галерея не ушла.
 
         `as_document=True` отправляет исходные файлы: Telegram не сжимает их,
         и мелкий текст на экранах остаётся читаемым.
@@ -156,7 +169,7 @@ class Telegram:
         Поэтому подпись с кнопкой уходит отдельным сообщением перед галереей.
         """
         if not urls:
-            return False
+            return []
         kind = "document" if as_document else "photo"
         media: list[dict[str, Any]] = []
         for index, url in enumerate(urls[:MEDIA_GROUP_LIMIT]):
@@ -166,11 +179,64 @@ class Telegram:
                 item["parse_mode"] = "HTML"
             media.append(item)
         try:
-            await self._call(
+            result = await self._call(
                 "sendMediaGroup",
                 {"chat_id": chat_id or self.chat_id, "media": json.dumps(media)},
             )
-            return True
         except TelegramError as exc:
             log.info("sendMediaGroup не прошёл (%s), шлю по одной", exc)
+            return []
+        ids = [_message_id(item) for item in result] if isinstance(result, list) else []
+        return [i for i in ids if i is not None]
+
+    async def copy_message(
+        self,
+        from_chat_id: str,
+        message_id: int,
+        *,
+        to_chat_id: str,
+        caption: str | None = None,
+        keyboard: dict[str, Any] | None = None,
+    ) -> bool:
+        """Повторить уже отправленное сообщение без пометки «переслано».
+
+        Так собирается топ: файл остаётся тем же, качество не теряется, и ни
+        Mobbin, ни Anthropic не трогаются. `caption` подменяет подпись — в топе
+        она другая: с местом и оценкой.
+        """
+        data: dict[str, Any] = {
+            "chat_id": to_chat_id,
+            "from_chat_id": from_chat_id,
+            "message_id": message_id,
+        }
+        if caption is not None:
+            data["caption"] = caption
+            data["parse_mode"] = "HTML"
+        if keyboard:
+            data["reply_markup"] = json.dumps(keyboard)
+        try:
+            await self._call("copyMessage", data)
+            return True
+        except TelegramError as exc:
+            log.warning("copyMessage %s из %s: %s", message_id, from_chat_id, exc)
+            return False
+
+    async def copy_messages(
+        self, from_chat_id: str, message_ids: Sequence[int], *, to_chat_id: str
+    ) -> bool:
+        """То же для галереи: копирует группу целиком, сохраняя группировку."""
+        if not message_ids:
+            return False
+        try:
+            await self._call(
+                "copyMessages",
+                {
+                    "chat_id": to_chat_id,
+                    "from_chat_id": from_chat_id,
+                    "message_ids": json.dumps([int(m) for m in message_ids]),
+                },
+            )
+            return True
+        except TelegramError as exc:
+            log.warning("copyMessages из %s: %s", from_chat_id, exc)
             return False
