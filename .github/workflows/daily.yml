@@ -28,6 +28,7 @@ on:
 
 permissions:
   contents: read
+  actions: read   # скачать артефакт с базой
 
 concurrency:
   group: digest
@@ -66,14 +67,15 @@ jobs:
           echo "chat=${{ github.event.client_payload.chat_id }}" >> "$GITHUB_OUTPUT"
           echo "Режим: $MODE"
 
-      - name: Кэш памяти о показанном
-        uses: actions/cache@v4
-        with:
-          # Только база. Токен Mobbin в кэш класть нельзя: кэши доступны
-          # рабочим процессам форков, а секреты — нет.
-          path: var/inspobot.sqlite3
-          key: inspobot-state-${{ github.run_id }}
-          restore-keys: inspobot-state-
+      - name: Восстановить базу из артефакта
+        id: restore
+        # Кэш для этого не годится: GitHub чистит его по своему усмотрению,
+        # а топ за месяц опирается на месяц истории. Артефакт живёт 90 дней.
+        # Если артефакт есть, но не скачался, — шаг падает и запуск
+        # останавливается: иначе пустая база в конце затёрла бы историю.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/state_artifact.py restore var/inspobot.sqlite3
 
       - name: Зависимости
         run: |
@@ -165,3 +167,15 @@ jobs:
       - name: Убрать секреты с диска
         if: always()
         run: rm -f var/mobbin_token.json var/token.sha var/chats.txt
+
+      - name: Сохранить базу в артефакт
+        # Только после удачного восстановления: иначе выложили бы пустую базу
+        # поверх истории. Каждый запуск оставляет свежий артефакт, старые
+        # истекают сами.
+        if: always() && steps.restore.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: inspobot-state
+          path: var/inspobot.sqlite3
+          retention-days: 90
+          if-no-files-found: ignore
