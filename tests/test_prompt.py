@@ -246,4 +246,29 @@ class ScoreTest(unittest.TestCase):
         from inspobot.prompt import PICK_SCHEMA
 
         self.assertIn("score", PICK_SCHEMA["required"])
-        self.assertEqual(PICK_SCHEMA["properties"]["score"]["maximum"], 10)
+        self.assertEqual(PICK_SCHEMA["properties"]["score"]["type"], "integer")
+
+    def test_schema_uses_no_keywords_the_api_rejects(self):
+        """Структурированный вывод отвечает 400 на minimum/maximum у integer,
+        а также на ряд других ограничений. Проверяем всю схему разом, а не
+        одно поле: следующая такая правка иначе снова упадёт в проде."""
+        from inspobot.prompt import DIGEST_SCHEMA
+
+        forbidden = {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+                     "multipleOf", "minLength", "maxLength", "pattern",
+                     "minItems", "maxItems", "format"}
+
+        def walk(node, path="schema", names_here=False):
+            # Внутри `properties` ключи — это имена наших полей, а не ключевые
+            # слова схемы. Иначе поле «pattern» (метка приёма) считалось бы
+            # запрещённым ограничением.
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if not names_here and key in forbidden:
+                        self.fail(f"{path}: API отклонит ключ «{key}»")
+                    walk(value, f"{path}.{key}", names_here=(key == "properties"))
+            elif isinstance(node, list):
+                for index, item in enumerate(node):
+                    walk(item, f"{path}[{index}]")
+
+        walk(DIGEST_SCHEMA)

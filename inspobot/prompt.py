@@ -39,7 +39,10 @@ PICK_SCHEMA: dict[str, Any] = {
         "pattern": {"type": "string"},
         "note": {"type": "string"},
         "screens": {"type": "array", "items": {"type": "string"}},
-        "score": {"type": "integer", "minimum": 1, "maximum": 10},
+        # Без minimum/maximum: структурированный вывод их у integer не
+        # принимает и отвечает 400. Границы шкалы держит промпт, а
+        # _score_from всё равно обрезает — на схему тут полагаться нечем.
+        "score": {"type": "integer"},
     },
     "required": [
         "slot", "platform", "screen_id", "mobbin_url", "image_url",
