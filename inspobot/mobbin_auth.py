@@ -238,10 +238,34 @@ def _token_request(
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     if response.status_code >= 400:
-        raise MobbinAuthError(
-            f"Token endpoint вернул {response.status_code}: {response.text[:400]}"
-        )
+        raise _token_error(response.status_code, response.text)
     return response.json()
+
+
+# Признаки того, что refresh-токен мёртв окончательно и повторять бессмысленно.
+SPENT_TOKEN_MARKERS = (
+    "refresh_token_already_used",
+    "refresh_token_not_found",
+    "invalid_grant",
+)
+
+SPENT_TOKEN_HELP = (
+    "Refresh-токен Mobbin больше не действует.\n\n"
+    "Их авторизация на Supabase: при каждом обновлении выдаётся новый "
+    "refresh-токен, а старый гасится. Этот уже был использован — почти всегда "
+    "это значит, что одним и тем же файлом пользуются в двух местах сразу "
+    "(например, сервер и GitHub Actions): кто обновился первым, тот и оставил "
+    "второго ни с чем.\n\n"
+    "Лечится входом заново:\n"
+    "    python -m inspobot.auth_cli\n\n"
+    "И проследите, чтобы дайджест запускался только в одном месте."
+)
+
+
+def _token_error(status: int, body: str) -> MobbinAuthError:
+    if any(marker in body for marker in SPENT_TOKEN_MARKERS):
+        return MobbinAuthError(SPENT_TOKEN_HELP)
+    return MobbinAuthError(f"Token endpoint вернул {status}: {body[:400]}")
 
 
 def _tokens_from_response(

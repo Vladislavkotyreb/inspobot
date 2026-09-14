@@ -137,6 +137,17 @@ def check_mobbin(config: Config) -> Result:
         )
     left = tokens.expires_at - datetime.now(timezone.utc).timestamp()
     if tokens.refresh_token:
+        if left <= 0:
+            # Раньше здесь стояла галочка: файл есть, refresh-токен есть — значит
+            # всё хорошо. Но обновление могло и не пройти: Supabase гасит старый
+            # refresh-токен, и если им уже воспользовались в другом месте, сбой
+            # вылезет только на боевом запуске. Честнее предупредить.
+            return Result(
+                "Mobbin",
+                WARN,
+                "access-токен истёк; обновится при первом запросе — "
+                "если refresh-токен не израсходован где-то ещё",
+            )
         return Result("Mobbin", OK, f"токен есть, обновляется сам (осталось {left / 60:.0f} мин)")
     if left <= 0:
         return Result("Mobbin", FAIL, "токен истёк, refresh-токена нет — нужен повторный вход")

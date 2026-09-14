@@ -209,3 +209,45 @@ class LoggingSetupTest(unittest.TestCase):
 
         logs.setup(verbose=False)
         self.assertEqual(logging.getLogger("inspobot").level, logging.INFO)
+
+
+class SpentRefreshTokenTest(unittest.TestCase):
+    """Израсходованный refresh-токен — самая частая поломка при двух копиях."""
+
+    def test_supabase_reply_becomes_an_instruction(self):
+        from inspobot.mobbin_auth import _token_error
+
+        body = '{"code":400,"error_code":"refresh_token_already_used","msg":"Invalid Refresh Token: Already Used"}'
+        message = str(_token_error(400, body))
+        self.assertIn("inspobot.auth_cli", message)
+        self.assertIn("в двух местах", message)
+        self.assertNotIn("refresh_token_already_used", message)
+
+    def test_other_markers_are_covered(self):
+        from inspobot.mobbin_auth import _token_error
+
+        for marker in ("refresh_token_not_found", "invalid_grant"):
+            self.assertIn("auth_cli", str(_token_error(400, f'{{"error":"{marker}"}}')))
+
+    def test_unknown_failure_keeps_the_raw_answer(self):
+        from inspobot.mobbin_auth import _token_error
+
+        message = str(_token_error(503, "gateway timeout"))
+        self.assertIn("503", message)
+        self.assertIn("gateway timeout", message)
+
+    def test_doctor_warns_instead_of_a_tick_when_access_expired(self):
+        import tempfile
+        import time
+        from pathlib import Path
+
+        from inspobot.mobbin_auth import Tokens, save_tokens
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for key in list(os.environ):
+                if key.startswith(("INSPOBOT_", "MOBBIN_", "TELEGRAM_", "ANTHROPIC_")):
+                    del os.environ[key]
+            path = Path(tmp) / "mobbin_token.json"
+            save_tokens(path, Tokens("a", "r", time.time() - 10, "cid", "", "https://as/t"))
+            config = Config(**{**Config.from_env().__dict__, "mobbin_token_file": path})
+            self.assertEqual(doctor.check_mobbin(config).status, doctor.WARN)
