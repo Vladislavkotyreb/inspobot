@@ -260,6 +260,59 @@ def link(meta: dict, client: dict) -> str:
     return f"vless://{client['id']}@{host}:{meta['port']}?{query}#{quote(client['name'])}"
 
 
+def client_config(meta: dict, client: dict, socks_port: int = 10808) -> dict:
+    """Конфиг клиента для самопроверки.
+
+    Тот же туннель, которым пойдёт телефон, только поднятый на самом
+    сервере и выведенный в локальный socks. Если через него ходит
+    трафик — связка «сервер + ссылка» рабочая, и остаётся один
+    подозреваемый: приложение.
+    """
+    return {
+        "log": {"loglevel": "warning"},
+        "inbounds": [
+            {
+                "tag": "socks",
+                "listen": "127.0.0.1",
+                "port": int(socks_port),
+                "protocol": "socks",
+                "settings": {"udp": False},
+            }
+        ],
+        "outbounds": [
+            {
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [
+                        {
+                            "address": meta["host"],
+                            "port": int(meta["port"]),
+                            "users": [
+                                {
+                                    "id": client["id"],
+                                    "encryption": "none",
+                                    "flow": FLOW,
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "serverName": meta["sni"],
+                        "fingerprint": FINGERPRINT,
+                        "publicKey": meta["public_key"],
+                        "shortId": meta["short_id"],
+                        "spiderX": "/",
+                    },
+                },
+            }
+        ],
+    }
+
+
 # --- командная строка ------------------------------------------------
 
 
@@ -292,6 +345,10 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("list", help="все клиенты со ссылками")
     commands.add_parser("render", help="пересобрать конфиг из шпаргалки")
     commands.add_parser("show", help="параметры сервера")
+    commands.add_parser("names", help="имена клиентов, по одному в строке")
+    selftest = commands.add_parser("client-config", help="конфиг клиента для самопроверки")
+    selftest.add_argument("name")
+    selftest.add_argument("--socks-port", type=int, default=10808)
     field = commands.add_parser("get", help="одно поле шпаргалки")
     field.add_argument("field")
 
@@ -335,6 +392,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "render":
             write_config(meta, args.config)
             print(f"Конфиг пересобран: {args.config}")
+        elif args.command == "names":
+            for client in meta.get("clients", []):
+                print(client["name"])
+        elif args.command == "client-config":
+            config = client_config(meta, find_client(meta, args.name), args.socks_port)
+            print(json.dumps(config, ensure_ascii=False, indent=2))
         elif args.command == "get":
             value = meta.get(args.field)
             if value is None:

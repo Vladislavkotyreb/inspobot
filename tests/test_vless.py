@@ -303,5 +303,45 @@ class Permissions(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(os.stat(config).st_mode), 0o600)
 
 
+class ClientConfig(unittest.TestCase):
+    """Конфиг для самопроверки: тот же туннель, что пойдёт на телефон."""
+
+    def test_совпадает_со_ссылкой(self):
+        # Разойдутся — самопроверка станет врать: покажет рабочим
+        # туннель, которого у клиента нет.
+        data = meta()
+        client = data["clients"][0]
+        config = vless.client_config(data, client)
+        json.dumps(config)
+        outbound = config["outbounds"][0]
+        user = outbound["settings"]["vnext"][0]["users"][0]
+        reality = outbound["streamSettings"]["realitySettings"]
+        query = {k: v[0] for k, v in parse_qs(urlparse(vless.link(data, client)).query).items()}
+        self.assertEqual(user["id"], client["id"])
+        self.assertEqual(user["flow"], query["flow"])
+        self.assertEqual(reality["publicKey"], query["pbk"])
+        self.assertEqual(reality["serverName"], query["sni"])
+        self.assertEqual(reality["shortId"], query["sid"])
+        self.assertEqual(reality["fingerprint"], query["fp"])
+        self.assertEqual(outbound["settings"]["vnext"][0]["address"], data["host"])
+        self.assertEqual(outbound["settings"]["vnext"][0]["port"], data["port"])
+
+    def test_socks_только_на_локальном_адресе(self):
+        # Иначе временная проверка на минуту открывает наружу
+        # незапароленный прокси.
+        data = meta()
+        inbound = vless.client_config(data, data["clients"][0])["inbounds"][0]
+        self.assertEqual(inbound["listen"], "127.0.0.1")
+
+    def test_порт_можно_сменить(self):
+        config = vless.client_config(meta(), meta()["clients"][0], 10809)
+        self.assertEqual(config["inbounds"][0]["port"], 10809)
+
+    def test_порт_становится_числом(self):
+        config = vless.client_config(meta(port="443"), meta()["clients"][0], "10808")
+        self.assertEqual(config["outbounds"][0]["settings"]["vnext"][0]["port"], 443)
+        self.assertEqual(config["inbounds"][0]["port"], 10808)
+
+
 if __name__ == "__main__":
     unittest.main()

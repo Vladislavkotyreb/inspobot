@@ -8,6 +8,7 @@
 #   sudo sh deploy/vless.sh remove имя     отобрать доступ
 #   sudo sh deploy/vless.sh status         что с сервером
 #   sudo sh deploy/vless.sh check          разобраться, почему не подключается
+#   sudo sh deploy/vless.sh selftest       пройти через туннель самому
 #   sudo sh deploy/vless.sh repair         пересобрать конфиг и починить права
 #   sudo sh deploy/vless.sh uninstall      снести Xray
 #
@@ -348,6 +349,62 @@ do_check() {
     fi
 }
 
+# Подключение к серверу его же ссылкой, с самого сервера. Поднимаем
+# временный клиент в socks и пробуем через него выйти наружу. Прошло —
+# связка «сервер + ссылка» рабочая целиком, и остаётся один
+# подозреваемый: приложение на телефоне.
+do_selftest() {
+    need_root selftest
+    need_installed
+    command -v xray >/dev/null 2>&1 || die "Нет xray."
+
+    NAME="${1:-}"
+    [ -n "$NAME" ] || NAME=$(py names | head -1)
+    [ -n "$NAME" ] || die "Кого проверяем? sudo sh deploy/vless.sh selftest phone"
+
+    SOCKS=10808
+    if command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q "127.0.0.1:$SOCKS "; then
+        SOCKS=10809
+    fi
+
+    WORK=$(mktemp -d)
+    trap 'kill "$CLIENT_PID" 2>/dev/null; rm -rf "$WORK"' EXIT INT TERM
+    py client-config "$NAME" --socks-port "$SOCKS" > "$WORK/client.json"
+
+    xray run -c "$WORK/client.json" > "$WORK/log" 2>&1 &
+    CLIENT_PID=$!
+    sleep 3
+    if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
+        echo "Клиент не запустился:" >&2
+        cat "$WORK/log" >&2
+        exit 1
+    fi
+
+    echo "Иду наружу через туннель клиента «$NAME»..."
+    THROUGH=$(curl -s -m 25 --socks5-hostname "127.0.0.1:$SOCKS" https://api.ipify.org || true)
+    DIRECT=$(py get host)
+
+    echo
+    if [ -z "$THROUGH" ]; then
+        echo "НЕ ПРОШЛО. Туннель не поднялся даже с этой машины — дело не в приложении."
+        echo "Журнал клиента:"
+        sed 's/^/    /' "$WORK/log"
+        echo "Журнал сервера:"
+        journalctl -u xray -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
+        exit 1
+    elif [ "$THROUGH" = "$DIRECT" ]; then
+        echo "ПРОШЛО: трафик вышел с адреса $THROUGH, то есть через сервер."
+        echo "Связка «сервер + ссылка» рабочая целиком. Значит, дело в приложении:"
+        echo "импортируйте ссылку из буфера обмена, а не сканированием QR."
+        echo
+        py link "$NAME"
+    else
+        echo "Странно: вышли с адреса $THROUGH, а сервер — $DIRECT."
+        echo "Похоже, трафик пошёл мимо туннеля."
+        exit 1
+    fi
+}
+
 do_status() {
     need_root status
     need_installed
@@ -384,6 +441,7 @@ case "$COMMAND" in
     status)    do_status ;;
     repair)    do_repair ;;
     check)     do_check ;;
+    selftest)  do_selftest "${1:-}" ;;
     uninstall) do_uninstall ;;
     *)         awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0" ;;
 esac
