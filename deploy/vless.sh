@@ -1,0 +1,229 @@
+#!/usr/bin/env sh
+# VLESS + Reality на этом же сервере. Запускать от root:
+#
+#   sudo sh deploy/vless.sh install        поставить и завести первого клиента
+#   sudo sh deploy/vless.sh add имя        ещё клиент — ссылка и QR
+#   sudo sh deploy/vless.sh link имя       показать ссылку снова
+#   sudo sh deploy/vless.sh list           все клиенты
+#   sudo sh deploy/vless.sh remove имя     отобрать доступ
+#   sudo sh deploy/vless.sh status         что с сервером
+#   sudo sh deploy/vless.sh uninstall      снести Xray
+#
+# Бота не трогает: тот никаких портов не слушает, только сам ходит
+# наружу. Xray встаёт на 443/tcp, рассылка и кнопки продолжают работать.
+
+set -e
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+ADMIN="$DIR/vless_admin.py"
+CONFIG=/usr/local/etc/xray/config.json
+META=/usr/local/etc/xray/reality.json
+PORT="${VLESS_PORT:-443}"
+
+# Маскировочные домены: Reality притворяется трафиком к одному из них.
+# Годится тот, что отвечает TLS 1.3 с HTTP/2, не заблокирован в России и
+# живёт недалеко от сервера. Проверяются по очереди, берётся первый
+# рабочий. Свой вариант: VLESS_SNI=example.com sh deploy/vless.sh install
+SNI_CANDIDATES="${VLESS_SNI:-www.microsoft.com dl.google.com www.samsung.com www.asus.com www.nvidia.com www.apple.com}"
+
+die() { echo "$@" >&2; exit 1; }
+
+need_root() {
+    [ "$(id -u)" = "0" ] || die "Нужен root: sudo sh deploy/vless.sh $1"
+}
+
+need_installed() {
+    [ -f "$META" ] || die "Сервер ещё не установлен. Сначала: sudo sh deploy/vless.sh install"
+}
+
+py() {
+    command -v python3 >/dev/null 2>&1 || die "Нет python3 — поставьте: apt install -y python3"
+    python3 "$ADMIN" --config "$CONFIG" --meta "$META" "$@"
+}
+
+restart_xray() {
+    systemctl restart xray
+    sleep 1
+    systemctl is-active --quiet xray || {
+        echo "Xray не поднялся. Что в журнале:" >&2
+        journalctl -u xray -n 20 --no-pager >&2 || true
+        exit 1
+    }
+}
+
+show_link() {
+    LINK="$1"
+    echo
+    echo "$LINK"
+    echo
+    if command -v qrencode >/dev/null 2>&1; then
+        qrencode -t ansiutf8 -m 2 "$LINK" || true
+        echo "QR не сканируется — просто скопируйте ссылку выше, её понимают все клиенты."
+    fi
+}
+
+# --- установка -------------------------------------------------------
+
+do_install() {
+    need_root install
+    if [ -f "$META" ]; then
+        echo "Уже установлено. Добавить клиента: sudo sh deploy/vless.sh add имя"
+        do_status
+        exit 0
+    fi
+
+    # 1. Порт. Занят — значит на нём уже что-то важное; молча отбирать нельзя.
+    if command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q ":$PORT "; then
+        echo "Порт $PORT уже занят:" >&2
+        ss -lntp 2>/dev/null | grep ":$PORT " >&2 || true
+        die "Освободите его или задайте другой: VLESS_PORT=8443 sudo -E sh deploy/vless.sh install"
+    fi
+
+    # 2. Инструменты
+    echo "=== пакеты ==="
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq curl openssl qrencode ca-certificates unzip >/dev/null
+    echo "curl, openssl, qrencode — на месте."
+
+    # 3. Внешний адрес
+    HOST="${VLESS_HOST:-}"
+    if [ -z "$HOST" ]; then
+        HOST=$(curl -s -m 10 https://api.ipify.org || true)
+    fi
+    [ -n "$HOST" ] || die "Не определил внешний адрес. Задайте руками: VLESS_HOST=1.2.3.4 sudo -E sh deploy/vless.sh install"
+    echo "Адрес сервера: $HOST"
+
+    # 4. Маскировочный домен
+    echo
+    echo "=== маскировка ==="
+    SNI=""
+    for CANDIDATE in $SNI_CANDIDATES; do
+        printf '%-20s ' "$CANDIDATE"
+        if timeout 12 openssl s_client -connect "$CANDIDATE:443" -servername "$CANDIDATE" \
+               -tls1_3 -alpn h2 </dev/null 2>/dev/null | grep -q 'ALPN protocol: h2'; then
+            echo "годится"
+            SNI="$CANDIDATE"
+            break
+        fi
+        echo "не отвечает TLS 1.3 + h2"
+    done
+    [ -n "$SNI" ] || die "Ни один домен не подошёл. Задайте свой: VLESS_SNI=example.com sudo -E sh deploy/vless.sh install"
+
+    # 5. Xray
+    echo
+    echo "=== Xray ==="
+    if ! command -v xray >/dev/null 2>&1; then
+        curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh \
+            | bash -s -- install >/dev/null
+    fi
+    command -v xray >/dev/null 2>&1 || die "Xray не установился — проверьте доступ к github.com с сервера."
+    echo "$(xray version 2>/dev/null | head -1)"
+
+    # 6. Ключи. В свежих сборках публичный ключ называется Password —
+    # ловим оба написания, иначе ссылка уедет с пустым pbk.
+    KEYS=$(xray x25519)
+    PRIVATE=$(printf '%s\n' "$KEYS" | grep -i 'private' | head -1 | sed 's/.*[:=][[:space:]]*//')
+    PUBLIC=$(printf '%s\n' "$KEYS" | grep -iE 'public|password' | head -1 | sed 's/.*[:=][[:space:]]*//')
+    if [ -z "$PRIVATE" ] || [ -z "$PUBLIC" ]; then
+        echo "xray x25519 ответил не так, как ожидалось:" >&2
+        printf '%s\n' "$KEYS" >&2
+        die "Ключи не разобрались."
+    fi
+    SHORT_ID=$(openssl rand -hex 8)
+
+    # 7. Конфиг и первый клиент
+    NAME="${1:-phone}"
+    mkdir -p /usr/local/etc/xray
+    chmod 700 /usr/local/etc/xray
+    LINK=$(py init --host "$HOST" --port "$PORT" --sni "$SNI" --dest "$SNI:443" \
+        --private-key "$PRIVATE" --public-key "$PUBLIC" --short-id "$SHORT_ID" --client "$NAME")
+
+    systemctl enable xray >/dev/null 2>&1 || true
+    restart_xray
+
+    # 8. Фаервол. iptables руками не трогаем: одна лишняя строка — и SSH
+    # отваливается, а консоль Netcup спасает не мгновенно.
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+        ufw allow "$PORT"/tcp >/dev/null 2>&1 && echo "ufw: порт $PORT/tcp открыт"
+    fi
+    if command -v iptables >/dev/null 2>&1 && iptables -S INPUT 2>/dev/null | head -1 | grep -q DROP; then
+        echo
+        echo "ВНИМАНИЕ: в iptables политика INPUT — DROP. Порт нужно открыть самому:"
+        echo "    iptables -I INPUT -p tcp --dport $PORT -j ACCEPT"
+    fi
+
+    echo
+    echo "=== готово ==="
+    echo "Клиент: $NAME"
+    show_link "$LINK"
+    echo "Приложения: айфон — v2RayTun или Streisand, андроид — v2rayNG или Hiddify,"
+    echo "мак и винда — Hiddify. Ссылка вставляется из буфера, QR сканируется камерой."
+    echo
+    echo "Ещё клиент:  sudo sh deploy/vless.sh add имя"
+}
+
+# --- остальное -------------------------------------------------------
+
+do_add() {
+    need_root "add $1"
+    need_installed
+    [ -n "$1" ] || die "Кому? sudo sh deploy/vless.sh add vlad-iphone"
+    LINK=$(py add "$1")
+    restart_xray
+    show_link "$LINK"
+}
+
+do_remove() {
+    need_root "remove $1"
+    need_installed
+    [ -n "$1" ] || die "Кого? sudo sh deploy/vless.sh remove vlad-iphone"
+    py remove "$1"
+    restart_xray
+    echo "Доступ отобран, Xray перезапущен."
+}
+
+do_link() {
+    need_root "link $1"
+    need_installed
+    [ -n "$1" ] || die "Чью ссылку? sudo sh deploy/vless.sh link vlad-iphone"
+    show_link "$(py link "$1")"
+}
+
+do_status() {
+    need_root status
+    need_installed
+    echo "служба:   $(systemctl is-active xray 2>/dev/null || echo нет)"
+    py show
+    if command -v ss >/dev/null 2>&1; then
+        ss -lnt 2>/dev/null | grep -q ":$PORT " \
+            && echo "порт $PORT: слушается" || echo "порт $PORT: НЕ слушается"
+    fi
+    echo "журнал:   journalctl -u xray -n 50 --no-pager"
+}
+
+do_uninstall() {
+    need_root uninstall
+    printf 'Снести Xray и всех клиентов? Бот не пострадает. [y/N] '
+    read -r ANSWER
+    case "$ANSWER" in
+        y|Y|yes|да) ;;
+        *) echo "Отменено."; exit 0 ;;
+    esac
+    curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh | bash -s -- remove --purge || true
+    rm -f "$META" "$CONFIG"
+    echo "Снесено."
+}
+
+COMMAND="${1:-}"
+[ $# -gt 0 ] && shift || true
+case "$COMMAND" in
+    install)   do_install "$@" ;;
+    add)       do_add "${1:-}" ;;
+    remove)    do_remove "${1:-}" ;;
+    link)      do_link "${1:-}" ;;
+    list)      need_root list; need_installed; py list ;;
+    status)    do_status ;;
+    uninstall) do_uninstall ;;
+    *)         awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0" ;;
+esac
