@@ -303,6 +303,29 @@ do_check() {
     fi
 
     echo
+    echo "=== ответ Reality ==="
+    # Стучимся на свой же порт так, как это делает посторонний: с SNI
+    # маскировочного домена и без ключа. Здоровый Reality молча отдаёт
+    # сертификат настоящего сайта. Если вместо него пусто или чужой
+    # сертификат — отвечает не Xray, и клиенту делать нечего.
+    SUBJECT=$(timeout 12 openssl s_client -connect "$HOST:$PORT" -servername "$SNI" \
+        </dev/null 2>/dev/null | openssl x509 -noout -subject 2>/dev/null || true)
+    case "$SUBJECT" in
+        "")
+            say_hmm "на свой адрес достучаться не вышло — у хостера так бывает,"
+            printf '        проверьте с домашнего компьютера:\n'
+            printf '        openssl s_client -connect %s:%s -servername %s </dev/null | head -20\n' \
+                "$HOST" "$PORT" "$SNI"
+            ;;
+        *"$SNI"*)
+            say_ok "отдаёт сертификат $SNI — маскировка работает"
+            ;;
+        *)
+            say_bad "отвечает чужим сертификатом: $SUBJECT"
+            ;;
+    esac
+
+    echo
     echo "=== адрес в ссылках ==="
     REAL=$(curl -s -m 10 https://api.ipify.org 2>/dev/null || true)
     if [ -z "$REAL" ]; then
