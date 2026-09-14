@@ -19,8 +19,10 @@
 from __future__ import annotations
 
 import argparse
+import grp
 import json
 import os
+import pwd
 import re
 import sys
 import uuid as uuidlib
@@ -28,6 +30,7 @@ from urllib.parse import quote, urlencode
 
 CONFIG = "/usr/local/etc/xray/config.json"
 META = "/usr/local/etc/xray/reality.json"
+UNIT = "/etc/systemd/system/xray.service"
 
 FLOW = "xtls-rprx-vision"
 FINGERPRINT = "chrome"
@@ -71,18 +74,46 @@ def load_meta(path: str = META) -> dict:
 
 
 def save_meta(meta: dict, path: str = META) -> None:
-    _write_private(path, json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
+    # Шпаргалку читает только root: Xray в неё не заглядывает.
+    _write(path, json.dumps(meta, ensure_ascii=False, indent=2) + "\n", 0o600)
 
 
-def _write_private(path: str, text: str) -> None:
-    """Запись через временный файл: до конца записи старый конфиг цел."""
+def _write(path: str, text: str, mode: int) -> None:
+    """Запись через временный файл: до конца записи старый файл цел."""
     directory = os.path.dirname(path) or "."
-    os.makedirs(directory, mode=0o700, exist_ok=True)
+    os.makedirs(directory, mode=0o755, exist_ok=True)
     temporary = path + ".new"
     with open(temporary, "w", encoding="utf-8") as handle:
         handle.write(text)
-    os.chmod(temporary, 0o600)
+    os.chmod(temporary, mode)
     os.replace(temporary, path)
+
+
+def service_gid(unit_path: str = UNIT) -> int | None:
+    """Группа, под которой systemd запускает Xray.
+
+    Штатный установщик поднимает демона от `nobody`, а не от root.
+    Конфиг в режиме 0600 от root такой демон открыть не может и падает
+    с `permission denied`, ничего про права не сказав. Поэтому группу
+    берём из юнита, а не предполагаем.
+    """
+    user, group = "nobody", ""
+    try:
+        with open(unit_path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line.startswith("User="):
+                    user = line.split("=", 1)[1].strip() or user
+                elif line.startswith("Group="):
+                    group = line.split("=", 1)[1].strip()
+    except OSError:
+        return None
+    try:
+        if group:
+            return grp.getgrnam(group).gr_gid
+        return pwd.getpwnam(user).pw_gid
+    except KeyError:
+        return None
 
 
 # --- конфиг Xray -----------------------------------------------------
@@ -145,9 +176,30 @@ def render_config(meta: dict) -> dict:
     }
 
 
-def write_config(meta: dict, path: str = CONFIG) -> None:
+def write_config(meta: dict, path: str = CONFIG, unit_path: str = UNIT) -> None:
     text = json.dumps(render_config(meta), ensure_ascii=False, indent=2) + "\n"
-    _write_private(path, text)
+    _write(path, text, 0o600)
+    gid = service_gid(unit_path)
+    if gid is None:
+        return
+    # 0640 root:<группа демона> — Xray читает, посторонние нет. Штатный
+    # установщик кладёт конфиг с приватным ключом в 0644, то есть
+    # доступным всем; здесь строже.
+    try:
+        os.chown(path, 0, gid)
+        os.chmod(path, 0o640)
+    except OSError:
+        # Не root или чужая файловая система: файл остаётся 0600.
+        # Служба тогда не поднимется, но это видно в журнале, а молча
+        # раздавать ключ всем подряд — хуже.
+        return
+    directory = os.path.dirname(path) or "."
+    try:
+        # В каталог демону нужно хотя бы войти. Секрет здесь же, в
+        # шпаргалке, но она 0600 — открытый каталог её не выдаёт.
+        os.chmod(directory, 0o755)
+    except OSError:
+        pass
 
 
 # --- клиенты ---------------------------------------------------------

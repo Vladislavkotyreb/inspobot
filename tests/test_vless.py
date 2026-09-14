@@ -10,8 +10,10 @@ import contextlib
 import importlib.util
 import io
 import json
+import grp
 import os
 import pathlib
+import pwd
 import stat
 import tempfile
 import unittest
@@ -217,6 +219,88 @@ class Cli(unittest.TestCase):
                 "--short-id", "a", "--client", "one",
             ])
             self.assertEqual(run_cli(*common, "add", "one"), 1)
+
+
+class Permissions(unittest.TestCase):
+    """Права на конфиг.
+
+    Xray работает не от root, а от пользователя из юнита (штатно —
+    `nobody`). Конфиг в 0600 от root он открыть не может и падает с
+    `permission denied`, про права при этом не говоря ни слова. Так
+    установка и легла в первый раз.
+    """
+
+    def unit(self, directory, body):
+        path = f"{directory}/xray.service"
+        pathlib.Path(path).write_text(body, encoding="utf-8")
+        return path
+
+    def test_группа_из_строки_user(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unit = self.unit(directory, "[Service]\nUser=root\nExecStart=/x\n")
+            self.assertEqual(vless.service_gid(unit), pwd.getpwnam("root").pw_gid)
+
+    def test_явная_группа_важнее_пользователя(self):
+        own = grp.getgrgid(os.getgid()).gr_name
+        with tempfile.TemporaryDirectory() as directory:
+            unit = self.unit(directory, f"[Service]\nUser=root\nGroup={own}\n")
+            self.assertEqual(vless.service_gid(unit), os.getgid())
+
+    def test_по_умолчанию_nobody(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unit = self.unit(directory, "[Service]\nExecStart=/x\n")
+            try:
+                expected = pwd.getpwnam("nobody").pw_gid
+            except KeyError:
+                self.skipTest("в системе нет пользователя nobody")
+            self.assertEqual(vless.service_gid(unit), expected)
+
+    def test_нет_юнита_нет_группы(self):
+        self.assertIsNone(vless.service_gid("/nonexistent/xray.service"))
+
+    def test_неизвестный_пользователь(self):
+        with tempfile.TemporaryDirectory() as directory:
+            unit = self.unit(directory, "[Service]\nUser=такого-нет\n")
+            self.assertIsNone(vless.service_gid(unit))
+
+    @unittest.skipUnless(os.geteuid() == 0, "смена владельца требует root")
+    def test_конфиг_доступен_группе_демона(self):
+        own = grp.getgrgid(os.getgid()).gr_name
+        with tempfile.TemporaryDirectory() as directory:
+            unit = self.unit(directory, f"[Service]\nUser=root\nGroup={own}\n")
+            config = f"{directory}/xray/config.json"
+            vless.write_config(meta(), config, unit)
+            state = os.stat(config)
+            self.assertEqual(stat.S_IMODE(state.st_mode), 0o640)
+            self.assertEqual(state.st_gid, os.getgid())
+            # В каталог демону надо хотя бы войти.
+            mode = stat.S_IMODE(os.stat(f"{directory}/xray").st_mode)
+            self.assertTrue(mode & stat.S_IXOTH, oct(mode))
+
+    def test_шпаргалка_остаётся_закрытой(self):
+        # В ней приватный ключ, и Xray в неё не заглядывает.
+        with tempfile.TemporaryDirectory() as directory:
+            path = f"{directory}/reality.json"
+            vless.save_meta(meta(), path)
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+
+    def test_без_прав_на_смену_владельца_файл_остаётся_закрытым(self):
+        # Лучше служба, которая не поднялась и сказала об этом в журнал,
+        # чем ключ, тихо разложенный в 0644 для всех.
+        with tempfile.TemporaryDirectory() as directory:
+            unit = self.unit(directory, "[Service]\nUser=root\n")
+            config = f"{directory}/config.json"
+            original = vless.os.chown
+
+            def refuse(*args, **kwargs):
+                raise PermissionError(1, "нельзя")
+
+            vless.os.chown = refuse
+            try:
+                vless.write_config(meta(), config, unit)
+            finally:
+                vless.os.chown = original
+            self.assertEqual(stat.S_IMODE(os.stat(config).st_mode), 0o600)
 
 
 if __name__ == "__main__":

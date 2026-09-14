@@ -7,6 +7,7 @@
 #   sudo sh deploy/vless.sh list           все клиенты
 #   sudo sh deploy/vless.sh remove имя     отобрать доступ
 #   sudo sh deploy/vless.sh status         что с сервером
+#   sudo sh deploy/vless.sh repair         пересобрать конфиг и починить права
 #   sudo sh deploy/vless.sh uninstall      снести Xray
 #
 # Бота не трогает: тот никаких портов не слушает, только сам ходит
@@ -41,7 +42,23 @@ py() {
     python3 "$ADMIN" --config "$CONFIG" --meta "$META" "$@"
 }
 
+# Xray работает от nobody, а не от root: конфиг с приватным ключом,
+# закрытый в 0600, он открыть не может и падает с permission denied.
+# Права проставляет vless_admin.py; здесь — проверка, что вышло.
+check_readable() {
+    [ -f "$CONFIG" ] || return 0
+    XUSER=$(sed -n 's/^User=//p' /etc/systemd/system/xray.service 2>/dev/null | head -1)
+    XUSER="${XUSER:-nobody}"
+    command -v runuser >/dev/null 2>&1 || return 0
+    runuser -u "$XUSER" -- test -r "$CONFIG" 2>/dev/null && return 0
+    echo "Конфиг не читается пользователем $XUSER, под которым работает Xray." >&2
+    ls -l "$CONFIG" >&2
+    echo "Починить: sudo sh deploy/vless.sh repair" >&2
+    return 1
+}
+
 restart_xray() {
+    check_readable || exit 1
     systemctl restart xray
     sleep 1
     systemctl is-active --quiet xray || {
@@ -68,6 +85,7 @@ do_install() {
     need_root install
     if [ -f "$META" ]; then
         echo "Уже установлено. Добавить клиента: sudo sh deploy/vless.sh add имя"
+        echo "Если служба не поднимается: sudo sh deploy/vless.sh repair"
         do_status
         exit 0
     fi
@@ -135,7 +153,6 @@ do_install() {
     # 7. Конфиг и первый клиент
     NAME="${1:-phone}"
     mkdir -p /usr/local/etc/xray
-    chmod 700 /usr/local/etc/xray
     LINK=$(py init --host "$HOST" --port "$PORT" --sni "$SNI" --dest "$SNI:443" \
         --private-key "$PRIVATE" --public-key "$PUBLIC" --short-id "$SHORT_ID" --client "$NAME")
 
@@ -190,6 +207,15 @@ do_link() {
     show_link "$(py link "$1")"
 }
 
+do_repair() {
+    need_root repair
+    need_installed
+    py render
+    restart_xray
+    echo "Служба поднята. Ссылки клиентов:"
+    py list
+}
+
 do_status() {
     need_root status
     need_installed
@@ -224,6 +250,7 @@ case "$COMMAND" in
     link)      do_link "${1:-}" ;;
     list)      need_root list; need_installed; py list ;;
     status)    do_status ;;
+    repair)    do_repair ;;
     uninstall) do_uninstall ;;
     *)         awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0" ;;
 esac

@@ -44,6 +44,7 @@ sudo sh deploy/vless.sh link masha      # показать ссылку ещё �
 sudo sh deploy/vless.sh list            # все, кто есть
 sudo sh deploy/vless.sh remove masha    # отобрать доступ
 sudo sh deploy/vless.sh status          # жив ли сервер
+sudo sh deploy/vless.sh repair          # пересобрать конфиг и починить права
 ```
 
 У каждого человека **свой** клиент. Не потому что жалко, а потому что
@@ -70,6 +71,22 @@ sudo sh deploy/vless.sh status          # жив ли сервер
 sudo sh deploy/vless.sh status
 sudo journalctl -u xray -n 50 --no-pager
 ```
+
+**`permission denied` на config.json в журнале, служба не стартует** —
+Xray работает не от root, а от `nobody`, и закрытый конфиг ему не
+открыть. Лечится одной командой:
+
+```bash
+sudo sh deploy/vless.sh repair
+```
+
+Она пересобирает конфиг с правами 0640 root:nogroup, поднимает службу и
+печатает ссылки всех клиентов. Шпаргалка с приватным ключом при этом
+остаётся 0600 — её Xray не читает.
+
+**`Special user nobody configured, this is not safe!`** — это ворчание
+systemd на юнит от штатного установщика Xray, а не ошибка. Служба с ним
+работает.
 
 **Служба активна, порт слушается, а клиент не цепляется** — почти
 всегда время на сервере разъехалось с реальным: TLS этого не прощает.
