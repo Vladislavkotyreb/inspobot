@@ -48,7 +48,14 @@ VARIANTS: dict[str, dict] = {
 }
 
 
-def build(meta: dict, client: dict, variant: str, port: int, socks: int):
+def build(
+    meta: dict,
+    client: dict,
+    variant: str,
+    port: int,
+    socks: int,
+    sni: str | None = None,
+):
     if variant not in VARIANTS:
         raise SystemExit(f"Нет варианта {variant!r}. Есть: {', '.join(VARIANTS)}")
     over = VARIANTS[variant]
@@ -59,6 +66,9 @@ def build(meta: dict, client: dict, variant: str, port: int, socks: int):
     if "sni" in over:
         local["sni"] = over["sni"]
         local["dest"] = f"{over['sni']}:443"
+    if sni:  # явно заданный домен важнее варианта
+        local["sni"] = sni
+        local["dest"] = f"{sni}:443"
 
     server = admin.render_config(local, "info")
     outbound = admin.client_config(local, client, socks, "127.0.0.1")
@@ -88,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--client")
     parser.add_argument("--port", type=int, default=8443)
     parser.add_argument("--socks", type=int, default=10808)
+    parser.add_argument("--sni", default=None)
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args(argv)
 
@@ -104,7 +115,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("В шпаргалке нет клиентов.")
     client = admin.find_client(meta, args.client) if args.client else clients[0]
 
-    server, outbound = build(meta, client, args.variant, args.port, args.socks)
+    server, outbound = build(
+        meta, client, args.variant, args.port, args.socks, args.sni
+    )
     os.makedirs(args.dir, exist_ok=True)
     for name, data in (("server.json", server), ("client.json", outbound)):
         path = os.path.join(args.dir, name)

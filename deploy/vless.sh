@@ -10,6 +10,7 @@
 #   sudo sh deploy/vless.sh check          разобраться, почему не подключается
 #   sudo sh deploy/vless.sh selftest       пройти через туннель самому
 #   sudo sh deploy/vless.sh diagnose       перебрать варианты, если туннель не встал
+#   sudo sh deploy/vless.sh set-domain X   сменить маскировочный домен
 #   sudo sh deploy/vless.sh repair         пересобрать конфиг и починить права
 #   sudo sh deploy/vless.sh uninstall      снести Xray
 #
@@ -28,10 +29,12 @@ PORT="${VLESS_PORT:-443}"
 CHECK_URL="${VLESS_CHECK_URL:-https://api.ipify.org}"
 
 # Маскировочные домены: Reality притворяется трафиком к одному из них.
-# Годится тот, что отвечает TLS 1.3 с HTTP/2, не заблокирован в России и
-# живёт недалеко от сервера. Проверяются по очереди, берётся первый
-# рабочий. Свой вариант: VLESS_SNI=example.com sh deploy/vless.sh install
-SNI_CANDIDATES="${VLESS_SNI:-www.microsoft.com dl.google.com www.samsung.com www.asus.com www.nvidia.com www.apple.com}"
+# Мало отвечать TLS 1.3 с HTTP/2 — домен обязан ещё и выдержать
+# настоящее рукопожатие REALITY, а это проверяется только попыткой.
+# www.microsoft.com из списка убран: поверхностную проверку он проходит,
+# а рукопожатие с ним не собирается (проверено на немецком узле Netcup).
+# Свой вариант: VLESS_SNI=example.com sh deploy/vless.sh install
+SNI_CANDIDATES="${VLESS_SNI:-dl.google.com www.samsung.com www.apple.com www.asus.com www.nvidia.com}"
 
 die() { echo "$@" >&2; exit 1; }
 
@@ -61,6 +64,39 @@ check_readable() {
     ls -l "$CONFIG" >&2
     echo "Починить: sudo sh deploy/vless.sh repair" >&2
     return 1
+}
+
+# Годится ли домен под маскировку — проверяется единственным честным
+# способом: поднять рядом такой же сервер с этим доменом и пройти через
+# него. Проверка «отвечает ли он TLS 1.3» ничего не гарантирует: именно
+# так в конфиг попал домен, с которым рукопожатие не собиралось.
+probe_domain() {
+    TRY="$1"
+    PPORT=8443
+    while ss -lnt 2>/dev/null | grep -q ":$PPORT "; do PPORT=$((PPORT + 1)); done
+    PSOCKS=10808
+    while ss -lnt 2>/dev/null | grep -q "127.0.0.1:$PSOCKS "; do PSOCKS=$((PSOCKS + 1)); done
+
+    PDIR=$(mktemp -d)
+    if ! python3 "$DIR/vless_probe.py" --meta "$META" --dir "$PDIR" --variant как-есть \
+            --sni "$TRY" --port "$PPORT" --socks "$PSOCKS" >/dev/null 2>&1; then
+        rm -rf "$PDIR"
+        return 1
+    fi
+    xray run -c "$PDIR/server.json" > "$PDIR/server.log" 2>&1 &
+    PSRV=$!
+    xray run -c "$PDIR/client.json" > "$PDIR/client.log" 2>&1 &
+    PCLI=$!
+    sleep 2
+    POUT=""
+    if kill -0 "$PSRV" 2>/dev/null && kill -0 "$PCLI" 2>/dev/null; then
+        POUT=$(curl -s -m 12 --socks5-hostname "127.0.0.1:$PSOCKS" "$CHECK_URL" 2>/dev/null || true)
+    fi
+    kill "$PSRV" "$PCLI" 2>/dev/null
+    wait "$PSRV" 2>/dev/null || true
+    wait "$PCLI" 2>/dev/null || true
+    rm -rf "$PDIR"
+    [ -n "$POUT" ]
 }
 
 restart_xray() {
@@ -118,23 +154,7 @@ do_install() {
     [ -n "$HOST" ] || die "Не определил внешний адрес. Задайте руками: VLESS_HOST=1.2.3.4 sudo -E sh deploy/vless.sh install"
     echo "Адрес сервера: $HOST"
 
-    # 4. Маскировочный домен
-    echo
-    echo "=== маскировка ==="
-    SNI=""
-    for CANDIDATE in $SNI_CANDIDATES; do
-        printf '%-20s ' "$CANDIDATE"
-        if timeout 12 openssl s_client -connect "$CANDIDATE:443" -servername "$CANDIDATE" \
-               -tls1_3 -alpn h2 </dev/null 2>/dev/null | grep -q 'ALPN protocol: h2'; then
-            echo "годится"
-            SNI="$CANDIDATE"
-            break
-        fi
-        echo "не отвечает TLS 1.3 + h2"
-    done
-    [ -n "$SNI" ] || die "Ни один домен не подошёл. Задайте свой: VLESS_SNI=example.com sudo -E sh deploy/vless.sh install"
-
-    # 5. Xray
+    # 4. Xray
     echo
     echo "=== Xray ==="
     if ! command -v xray >/dev/null 2>&1; then
@@ -144,7 +164,7 @@ do_install() {
     command -v xray >/dev/null 2>&1 || die "Xray не установился — проверьте доступ к github.com с сервера."
     echo "$(xray version 2>/dev/null | head -1)"
 
-    # 6. Ключи. В свежих сборках публичный ключ называется Password —
+    # 5. Ключи. В свежих сборках публичный ключ называется Password —
     # ловим оба написания, иначе ссылка уедет с пустым pbk.
     KEYS=$(xray x25519)
     PRIVATE=$(printf '%s\n' "$KEYS" | grep -i 'private' | head -1 | sed 's/.*[:=][[:space:]]*//')
@@ -156,11 +176,36 @@ do_install() {
     fi
     SHORT_ID=$(openssl rand -hex 8)
 
-    # 7. Конфиг и первый клиент
+    # 6. Конфиг и первый клиент. Домен пока любой из списка: настоящий
+    #    подберём следующим шагом, для него уже нужны ключи и клиент.
     NAME="${1:-phone}"
+    FIRST=$(printf '%s\n' $SNI_CANDIDATES | head -1)
     mkdir -p /usr/local/etc/xray
-    LINK=$(py init --host "$HOST" --port "$PORT" --sni "$SNI" --dest "$SNI:443" \
-        --private-key "$PRIVATE" --public-key "$PUBLIC" --short-id "$SHORT_ID" --client "$NAME")
+    py init --host "$HOST" --port "$PORT" --sni "$FIRST" --dest "$FIRST:443" \
+        --private-key "$PRIVATE" --public-key "$PUBLIC" --short-id "$SHORT_ID" \
+        --client "$NAME" >/dev/null
+
+    # 7. Маскировочный домен — перебором с настоящим рукопожатием.
+    #    Проверка «отвечает ли домен TLS 1.3» недостаточна: домен может
+    #    её пройти и всё равно не дать собрать рукопожатие REALITY.
+    echo
+    echo "=== маскировка ==="
+    SNI=""
+    for CANDIDATE in $SNI_CANDIDATES; do
+        printf '  %s ... ' "$CANDIDATE"
+        if probe_domain "$CANDIDATE"; then
+            echo "годится"
+            SNI="$CANDIDATE"
+            break
+        fi
+        echo "рукопожатие не собирается"
+    done
+    if [ -z "$SNI" ]; then
+        rm -f "$META" "$CONFIG"
+        die "Ни один домен не подошёл. Задайте свой: VLESS_SNI=example.com sudo -E sh deploy/vless.sh install"
+    fi
+    py set-domain "$SNI" >/dev/null
+    LINK=$(py link "$NAME")
 
     systemctl enable xray >/dev/null 2>&1 || true
     restart_xray
@@ -178,6 +223,7 @@ do_install() {
 
     echo
     echo "=== готово ==="
+    echo "Маскировка: $SNI"
     echo "Клиент: $NAME"
     show_link "$LINK"
     echo "Приложения: айфон — v2RayTun или Streisand, андроид — v2rayNG или Hiddify,"
@@ -557,6 +603,31 @@ INNER
     fi
 }
 
+do_set_domain() {
+    need_root "set-domain $1"
+    need_installed
+    [ -n "$1" ] || die "Какой домен? sudo sh deploy/vless.sh set-domain dl.google.com"
+    command -v xray >/dev/null 2>&1 || die "Нет xray."
+
+    printf 'Проверяю %s настоящим рукопожатием... ' "$1"
+    if probe_domain "$1"; then
+        echo "годится"
+    else
+        echo "НЕ ГОДИТСЯ"
+        die "Через него рукопожатие не проходит — домен не меняю. Подобрать: sudo sh deploy/vless.sh diagnose"
+    fi
+
+    py set-domain "$1" >/dev/null
+    restart_xray
+    echo
+    echo "Домен сменён на $1, служба перезапущена."
+    echo
+    echo "ВАЖНО: домен зашит в каждую ссылку, поэтому все прежние ссылки"
+    echo "перестали работать. Раздайте новые — вот они:"
+    echo
+    py list
+}
+
 do_status() {
     need_root status
     need_installed
@@ -595,6 +666,7 @@ case "$COMMAND" in
     check)     do_check ;;
     selftest)  do_selftest "${1:-}" ;;
     diagnose)  do_diagnose "${1:-}" ;;
+    set-domain) do_set_domain "${1:-}" ;;
     uninstall) do_uninstall ;;
     *)         awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0" ;;
 esac

@@ -363,6 +363,8 @@ def main(argv: list[str] | None = None) -> int:
                           choices=["none", "error", "warning", "info", "debug"])
     commands.add_parser("show", help="параметры сервера")
     commands.add_parser("names", help="имена клиентов, по одному в строке")
+    domain = commands.add_parser("set-domain", help="сменить маскировочный домен")
+    domain.add_argument("domain")
     selftest = commands.add_parser("client-config", help="конфиг клиента для самопроверки")
     selftest.add_argument("name")
     selftest.add_argument("--socks-port", type=int, default=10808)
@@ -410,6 +412,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "render":
             write_config(meta, args.config, loglevel=args.loglevel)
             print(f"Конфиг пересобран: {args.config} (журнал: {args.loglevel})")
+        elif args.command == "set-domain":
+            meta["sni"] = args.domain
+            meta["dest"] = f"{args.domain}:443"
+            _apply(meta, args.config, args.meta)
+            print(args.domain)
         elif args.command == "names":
             for client in meta.get("clients", []):
                 print(client["name"])
