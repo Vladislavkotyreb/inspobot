@@ -9,6 +9,7 @@
 #   sudo sh deploy/vless.sh status         что с сервером
 #   sudo sh deploy/vless.sh check          разобраться, почему не подключается
 #   sudo sh deploy/vless.sh selftest       пройти через туннель самому
+#   sudo sh deploy/vless.sh diagnose       перебрать варианты, если туннель не встал
 #   sudo sh deploy/vless.sh repair         пересобрать конфиг и починить права
 #   sudo sh deploy/vless.sh uninstall      снести Xray
 #
@@ -22,6 +23,9 @@ ADMIN="$DIR/vless_admin.py"
 CONFIG=/usr/local/etc/xray/config.json
 META=/usr/local/etc/xray/reality.json
 PORT="${VLESS_PORT:-443}"
+# Куда ходим, чтобы узнать свой адрес. Меняется на случай, когда
+# этот сервис недоступен из сети сервера.
+CHECK_URL="${VLESS_CHECK_URL:-https://api.ipify.org}"
 
 # Маскировочные домены: Reality притворяется трафиком к одному из них.
 # Годится тот, что отвечает TLS 1.3 с HTTP/2, не заблокирован в России и
@@ -109,7 +113,7 @@ do_install() {
     # 3. Внешний адрес
     HOST="${VLESS_HOST:-}"
     if [ -z "$HOST" ]; then
-        HOST=$(curl -s -m 10 https://api.ipify.org || true)
+        HOST=$(curl -s -m 10 "$CHECK_URL" || true)
     fi
     [ -n "$HOST" ] || die "Не определил внешний адрес. Задайте руками: VLESS_HOST=1.2.3.4 sudo -E sh deploy/vless.sh install"
     echo "Адрес сервера: $HOST"
@@ -296,12 +300,26 @@ do_check() {
 
     echo
     echo "=== маскировочный домен $SNI ==="
-    if timeout 12 openssl s_client -connect "$SNI:443" -servername "$SNI" \
-           -tls1_3 -alpn h2 </dev/null 2>/dev/null | grep -q 'ALPN protocol: h2'; then
+    PROBE=$(timeout 12 openssl s_client -connect "$SNI:443" -servername "$SNI" \
+        -tls1_3 -alpn h2 </dev/null 2>/dev/null || true)
+    if printf '%s\n' "$PROBE" | grep -q 'ALPN protocol: h2'; then
         say_ok "отвечает TLS 1.3 + h2"
     else
         say_bad "не отвечает — смените домен, см. docs/VLESS.md"
     fi
+    # REALITY прячет аутентификацию внутри обмена ключами X25519. Если
+    # домен согласует пост-квантовый гибрид (X25519MLKEM768), прятать
+    # становится некуда, и рукопожатие отвергается — при полностью
+    # исправных ключах и настройках.
+    GROUP=$(printf '%s\n' "$PROBE" | grep -i 'Negotiated TLS1.3 group' | head -1 | sed 's/.*: //')
+    case "$GROUP" in
+        "")        say_hmm "группа обмена ключами не показана (старый openssl)" ;;
+        *MLKEM*|*mlkem*|*Kyber*)
+            say_bad "домен согласует $GROUP — пост-квантовый обмен, REALITY с ним не работает"
+            echo "        смените домен: sudo sh deploy/vless.sh diagnose"
+            ;;
+        *)         say_ok "обмен ключами: $GROUP" ;;
+    esac
 
     echo
     echo "=== ответ Reality ==="
@@ -328,7 +346,7 @@ do_check() {
 
     echo
     echo "=== адрес в ссылках ==="
-    REAL=$(curl -s -m 10 https://api.ipify.org 2>/dev/null || true)
+    REAL=$(curl -s -m 10 "$CHECK_URL" 2>/dev/null || true)
     if [ -z "$REAL" ]; then
         say_hmm "внешний адрес не определился, сверьте сами: в ссылках $HOST"
     elif [ "$REAL" = "$HOST" ]; then
@@ -393,7 +411,7 @@ do_selftest() {
         sleep 3
         OUT=""
         if kill -0 "$CLIENT_PID" 2>/dev/null; then
-            OUT=$(curl -s -m 20 --socks5-hostname "127.0.0.1:$SOCKS" https://api.ipify.org 2>/dev/null || true)
+            OUT=$(curl -s -m 20 --socks5-hostname "127.0.0.1:$SOCKS" "$CHECK_URL" 2>/dev/null || true)
         fi
         kill "$CLIENT_PID" 2>/dev/null
         wait "$CLIENT_PID" 2>/dev/null || true
@@ -441,6 +459,104 @@ do_selftest() {
     py link "$NAME"
 }
 
+# Перебор вариантов. Поднимаем рядом, на запасном порту, такой же
+# сервер — меняя по одной вещи за раз — и смотрим, где рукопожатие
+# пройдёт. Живую службу на 443 не трогаем вовсе.
+do_diagnose() {
+    need_root diagnose
+    need_installed
+    command -v xray >/dev/null 2>&1 || die "Нет xray."
+
+    NAME="${1:-}"
+    [ -n "$NAME" ] || NAME=$(py names | head -1)
+
+    PROBE_PORT=8443
+    PROBE_SOCKS=10808
+    while ss -lnt 2>/dev/null | grep -q ":$PROBE_PORT "; do
+        PROBE_PORT=$((PROBE_PORT + 1))
+    done
+    while ss -lnt 2>/dev/null | grep -q "127.0.0.1:$PROBE_SOCKS "; do
+        PROBE_SOCKS=$((PROBE_SOCKS + 1))
+    done
+
+    WORK=$(mktemp -d)
+    SRV_PID=""
+    CLI_PID=""
+    cleanup() {
+        [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null
+        [ -n "$CLI_PID" ] && kill "$CLI_PID" 2>/dev/null
+        rm -rf "$WORK"
+    }
+    trap cleanup EXIT INT TERM
+
+    echo "Пробный сервер на порту $PROBE_PORT, живая служба на $PORT не тронута."
+    echo "Каждый вариант отличается от рабочего ровно одной вещью."
+    echo
+
+    WORKED=""
+    for VARIANT in $(python3 "$DIR/vless_probe.py" --list); do
+        printf '  %s ... ' "$VARIANT"
+        rm -rf "$WORK/v"
+        if ! python3 "$DIR/vless_probe.py" --meta "$META" --dir "$WORK/v" \
+                --variant "$VARIANT" --client "$NAME" \
+                --port "$PROBE_PORT" --socks "$PROBE_SOCKS" 2>"$WORK/err"; then
+            echo "конфиг не собрался: $(cat "$WORK/err")"
+            continue
+        fi
+
+        xray run -c "$WORK/v/server.json" > "$WORK/v/server.log" 2>&1 &
+        SRV_PID=$!
+        xray run -c "$WORK/v/client.json" > "$WORK/v/client.log" 2>&1 &
+        CLI_PID=$!
+        sleep 2
+
+        OUT=""
+        if kill -0 "$SRV_PID" 2>/dev/null && kill -0 "$CLI_PID" 2>/dev/null; then
+            OUT=$(curl -s -m 10 --socks5-hostname "127.0.0.1:$PROBE_SOCKS" \
+                "$CHECK_URL" 2>/dev/null || true)
+        fi
+
+        if [ -n "$OUT" ]; then
+            echo "РАБОТАЕТ"
+            [ -z "$WORKED" ] && WORKED="$VARIANT"
+        else
+            REASON=$(grep -o 'REALITY: [^"]*' "$WORK/v/server.log" 2>/dev/null | tail -1)
+            [ -z "$REASON" ] && REASON=$(tail -1 "$WORK/v/server.log" 2>/dev/null)
+            echo "нет${REASON:+  ($REASON)}"
+        fi
+
+        kill "$SRV_PID" "$CLI_PID" 2>/dev/null
+        wait "$SRV_PID" 2>/dev/null || true
+        wait "$CLI_PID" 2>/dev/null || true
+        SRV_PID=""
+        CLI_PID=""
+    done
+
+    echo
+    if [ "$WORKED" = "как-есть" ]; then
+        echo "Та же конфигурация на запасном порту $PROBE_PORT работает."
+        echo "Значит, дело не в настройках, а в живой службе или в порте $PORT."
+        echo
+        echo "Что сейчас в живом конфиге (приватный ключ скрыт):"
+        python3 - "$CONFIG" <<'INNER' | sed 's/^/    /'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+inbound = data["inbounds"][0]
+reality = dict(inbound["streamSettings"]["realitySettings"])
+reality["privateKey"] = "<скрыт>"
+print("listen:", inbound.get("listen"), "port:", inbound.get("port"))
+print("clients:", [(c.get("email"), c.get("flow")) for c in inbound["settings"]["clients"]])
+print("reality:", json.dumps(reality, ensure_ascii=False))
+INNER
+    elif [ -n "$WORKED" ]; then
+        echo "Заработало на варианте: $WORKED"
+        echo "Пришлите эту строку — переведу рабочую конфигурацию на него."
+    else
+        echo "Не заработал ни один вариант. Значит, дело не в этих настройках."
+        echo "Пришлите вывод целиком."
+    fi
+}
+
 do_status() {
     need_root status
     need_installed
@@ -478,6 +594,7 @@ case "$COMMAND" in
     repair)    do_repair ;;
     check)     do_check ;;
     selftest)  do_selftest "${1:-}" ;;
+    diagnose)  do_diagnose "${1:-}" ;;
     uninstall) do_uninstall ;;
     *)         awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0" ;;
 esac

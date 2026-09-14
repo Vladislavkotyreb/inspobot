@@ -26,6 +26,12 @@ SPEC = importlib.util.spec_from_file_location(
 vless = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(vless)
 
+PROBE_SPEC = importlib.util.spec_from_file_location(
+    "vless_probe", ROOT / "deploy" / "vless_probe.py"
+)
+probe = importlib.util.module_from_spec(PROBE_SPEC)
+PROBE_SPEC.loader.exec_module(probe)
+
 
 def meta(**overrides):
     base = {
@@ -368,6 +374,74 @@ class ClientConfig(unittest.TestCase):
         self.assertEqual(
             config["outbounds"][0]["settings"]["vnext"][0]["address"], data["host"]
         )
+
+
+class Probe(unittest.TestCase):
+    """Варианты для перебора.
+
+    Каждый вариант поднимает пару «сервер + клиент». Если вариант
+    поменяет что-то на одной стороне и забудет на другой, перебор
+    покажет «не работает» там, где сломал он сам, — и уведёт разбор
+    в сторону.
+    """
+
+    def pair(self, variant):
+        data = meta()
+        return probe.build(data, data["clients"][0], variant, 8443, 10808)
+
+    def test_каждый_вариант_собирается(self):
+        for variant in probe.VARIANTS:
+            with self.subTest(variant=variant):
+                server, client = self.pair(variant)
+                json.dumps(server)
+                json.dumps(client)
+
+    def test_стороны_согласованы(self):
+        for variant in probe.VARIANTS:
+            with self.subTest(variant=variant):
+                server, client = self.pair(variant)
+                reality_in = server["inbounds"][0]["streamSettings"]["realitySettings"]
+                reality_out = client["outbounds"][0]["streamSettings"]["realitySettings"]
+                self.assertEqual(reality_in["serverNames"], [reality_out["serverName"]])
+                self.assertIn(reality_out["shortId"], reality_in["shortIds"])
+                self.assertTrue(reality_in["dest"].startswith(reality_out["serverName"]))
+                user = client["outbounds"][0]["settings"]["vnext"][0]["users"][0]
+                entry = server["inbounds"][0]["settings"]["clients"][0]
+                self.assertEqual(entry.get("flow"), user.get("flow"))
+                self.assertEqual(entry["id"], user["id"])
+
+    def test_порт_и_адрес_пробные(self):
+        server, client = self.pair("как-есть")
+        self.assertEqual(server["inbounds"][0]["port"], 8443)
+        vnext = client["outbounds"][0]["settings"]["vnext"][0]
+        self.assertEqual(vnext["port"], 8443)
+        # Пробуем через петлю: сеть хостера тут ни при чём.
+        self.assertEqual(vnext["address"], "127.0.0.1")
+
+    def test_вариант_меняет_ровно_одно(self):
+        base_server, base_client = self.pair("как-есть")
+        for variant in probe.VARIANTS:
+            if variant == "как-есть":
+                continue
+            with self.subTest(variant=variant):
+                server, client = self.pair(variant)
+                self.assertNotEqual(
+                    (json.dumps(server, sort_keys=True), json.dumps(client, sort_keys=True)),
+                    (json.dumps(base_server, sort_keys=True), json.dumps(base_client, sort_keys=True)),
+                    "вариант ничем не отличается от базового",
+                )
+
+    def test_живую_шпаргалку_не_портит(self):
+        # build работает на копии: иначе перебор испортил бы рабочий конфиг.
+        data = meta()
+        before = json.dumps(data, sort_keys=True)
+        probe.build(data, data["clients"][0], "домен-google", 8443, 10808)
+        self.assertEqual(json.dumps(data, sort_keys=True), before)
+
+    def test_неизвестный_вариант_отклоняется(self):
+        data = meta()
+        with self.assertRaises(SystemExit):
+            probe.build(data, data["clients"][0], "такого-нет", 8443, 10808)
 
 
 if __name__ == "__main__":
