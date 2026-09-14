@@ -292,6 +292,8 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("list", help="все клиенты со ссылками")
     commands.add_parser("render", help="пересобрать конфиг из шпаргалки")
     commands.add_parser("show", help="параметры сервера")
+    field = commands.add_parser("get", help="одно поле шпаргалки")
+    field.add_argument("field")
 
     args = parser.parse_args(argv)
 
@@ -333,6 +335,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "render":
             write_config(meta, args.config)
             print(f"Конфиг пересобран: {args.config}")
+        elif args.command == "get":
+            value = meta.get(args.field)
+            if value is None:
+                raise VlessError(f"В шпаргалке нет поля {args.field!r}.")
+            print(value)
         elif args.command == "show":
             print(f"адрес:  {meta['host']}:{meta['port']}")
             print(f"маска:  {meta['sni']}")

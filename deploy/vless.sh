@@ -7,6 +7,7 @@
 #   sudo sh deploy/vless.sh list           все клиенты
 #   sudo sh deploy/vless.sh remove имя     отобрать доступ
 #   sudo sh deploy/vless.sh status         что с сервером
+#   sudo sh deploy/vless.sh check          разобраться, почему не подключается
 #   sudo sh deploy/vless.sh repair         пересобрать конфиг и починить права
 #   sudo sh deploy/vless.sh uninstall      снести Xray
 #
@@ -216,6 +217,114 @@ do_repair() {
     py list
 }
 
+# Разбор «клиент показывает n/a». Каждая строка — отдельная причина,
+# по которой соединение не встаёт; проверяются все, даже если первая
+# уже нашлась, иначе чинить придётся по одной за круг переписки.
+do_check() {
+    need_root check
+    need_installed
+    BAD=0
+    say_ok()   { printf '  ok    %s\n' "$1"; }
+    say_bad()  { printf '  ПЛОХО %s\n' "$1"; BAD=$((BAD + 1)); }
+    say_hmm()  { printf '  ?     %s\n' "$1"; }
+
+    HOST=$(py get host); SNI=$(py get sni)
+
+    echo "=== служба ==="
+    if systemctl is-active --quiet xray 2>/dev/null; then
+        say_ok "xray запущен"
+    else
+        say_bad "xray не запущен — sudo sh deploy/vless.sh repair"
+        journalctl -u xray -n 5 --no-pager 2>/dev/null | sed 's/^/        /'
+    fi
+
+    XUSER=$(sed -n 's/^User=//p' /etc/systemd/system/xray.service 2>/dev/null | head -1)
+    XUSER="${XUSER:-nobody}"
+    if command -v runuser >/dev/null 2>&1; then
+        if runuser -u "$XUSER" -- test -r "$CONFIG" 2>/dev/null; then
+            say_ok "конфиг читается пользователем $XUSER"
+        else
+            say_bad "конфиг НЕ читается пользователем $XUSER — sudo sh deploy/vless.sh repair"
+        fi
+    fi
+
+    echo
+    echo "=== порт $PORT ==="
+    if command -v ss >/dev/null 2>&1; then
+        LINE=$(ss -lntp 2>/dev/null | grep ":$PORT " | head -1)
+        if [ -n "$LINE" ]; then
+            say_ok "слушается: $(echo "$LINE" | tr -s ' ')"
+        else
+            say_bad "никто не слушает порт $PORT"
+        fi
+    else
+        say_hmm "нет ss — порт не проверить (apt install -y iproute2)"
+    fi
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+        ufw status 2>/dev/null | grep -q "$PORT" \
+            && say_ok "ufw: порт открыт" || say_bad "ufw включён, а порт $PORT не открыт"
+    fi
+    if command -v iptables >/dev/null 2>&1 && iptables -S INPUT 2>/dev/null | head -1 | grep -q DROP; then
+        say_bad "iptables INPUT = DROP. Открыть: iptables -I INPUT -p tcp --dport $PORT -j ACCEPT"
+    fi
+
+    echo
+    echo "=== ключи ==="
+    # Публичный ключ в ссылке должен соответствовать приватному в конфиге.
+    # Если нет — снаружи всё выглядит здоровым, а клиент молча не цепляется.
+    DERIVED=$(xray x25519 -i "$(py get private_key)" 2>/dev/null \
+        | grep -iE 'public|password' | head -1 | sed 's/.*[:=][[:space:]]*//')
+    if [ -z "$DERIVED" ]; then
+        say_hmm "эта сборка Xray не умеет проверять ключ — пропускаю"
+    elif [ "$DERIVED" = "$(py get public_key)" ]; then
+        say_ok "публичный ключ в ссылках соответствует приватному"
+    else
+        say_bad "ключи НЕ сходятся: в ссылках чужой pbk, клиент не подключится"
+        echo "        починить: python3 deploy/vless_admin.py --meta $META get public_key"
+        echo "        и заменить его в шпаргалке на: $DERIVED"
+    fi
+
+    echo
+    echo "=== время ==="
+    # TLS не прощает расхождения часов: рукопожатие не состоится.
+    if command -v timedatectl >/dev/null 2>&1; then
+        timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -q yes \
+            && say_ok "часы синхронизированы ($(date '+%H:%M:%S %Z'))" \
+            || say_bad "часы НЕ синхронизированы — apt install -y systemd-timesyncd"
+    fi
+
+    echo
+    echo "=== маскировочный домен $SNI ==="
+    if timeout 12 openssl s_client -connect "$SNI:443" -servername "$SNI" \
+           -tls1_3 -alpn h2 </dev/null 2>/dev/null | grep -q 'ALPN protocol: h2'; then
+        say_ok "отвечает TLS 1.3 + h2"
+    else
+        say_bad "не отвечает — смените домен, см. docs/VLESS.md"
+    fi
+
+    echo
+    echo "=== адрес в ссылках ==="
+    REAL=$(curl -s -m 10 https://api.ipify.org 2>/dev/null || true)
+    if [ -z "$REAL" ]; then
+        say_hmm "внешний адрес не определился, сверьте сами: в ссылках $HOST"
+    elif [ "$REAL" = "$HOST" ]; then
+        say_ok "$HOST — совпадает с реальным"
+    else
+        say_bad "в ссылках $HOST, а сервер отвечает с $REAL — ссылки ведут не туда"
+    fi
+
+    echo
+    if [ "$BAD" = "0" ]; then
+        echo "Сервер в порядке. Если клиент всё равно пишет n/a — дело в нём:"
+        echo "проверьте, что при импорте подхватился flow xtls-rprx-vision и"
+        echo "ссылка скопировалась целиком, до последнего символа."
+        echo
+        py list
+    else
+        echo "Проблем найдено: $BAD. Чинить сверху вниз."
+    fi
+}
+
 do_status() {
     need_root status
     need_installed
@@ -251,6 +360,7 @@ case "$COMMAND" in
     list)      need_root list; need_installed; py list ;;
     status)    do_status ;;
     repair)    do_repair ;;
+    check)     do_check ;;
     uninstall) do_uninstall ;;
     *)         awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0" ;;
 esac
