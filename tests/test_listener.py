@@ -88,10 +88,13 @@ class HandleUpdateTest(unittest.TestCase):
         self.assertEqual(run.await_args.args[1], "month")
         self.assertTrue(self.telegram.messages)
 
-    def test_help_answers_without_running(self):
+    def test_help_says_what_the_bot_does(self):
         run = self.handle(typed("/help"))
         run.assert_not_awaited()
-        self.assertIn("/week", self.telegram.messages[0][0])
+        text = self.telegram.messages[0][0]
+        self.assertIn("Mobbin", text)
+        self.assertIn("11:00", text)
+        self.assertLess(len(text), 400, "приветствие должно быть коротким")
 
     def test_plain_text_is_ignored(self):
         run = self.handle(typed("привет"))
