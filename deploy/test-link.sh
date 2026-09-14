@@ -1,7 +1,9 @@
 #!/usr/bin/env sh
 # Проверка ссылки настоящим клиентом, с обычного компьютера.
 #
-#   sh deploy/test-link.sh 'vless://...'
+#   sh deploy/test-link.sh 'vless://...' 'vless://...'
+#
+# Ссылок можно дать несколько — проверит каждую и скажет, какая прошла.
 #
 # Запускать НА СВОЁМ компьютере (мак, линукс), не на сервере. Скачивает
 # Xray во временный каталог, поднимает клиента по ссылке, выходит через
@@ -14,10 +16,9 @@
 
 set -e
 
-LINK="${1:-}"
-[ -n "$LINK" ] || {
-    echo "Нужна ссылка в кавычках:" >&2
-    echo "    sh deploy/test-link.sh 'vless://...'" >&2
+[ $# -gt 0 ] || {
+    echo "Нужна ссылка в кавычках (можно несколько):" >&2
+    echo "    sh deploy/test-link.sh 'vless://...' 'vless://...'" >&2
     exit 1
 }
 
@@ -73,10 +74,13 @@ if [ -z "$DIRECT" ]; then
     exit 1
 fi
 
-# 3. Свободный порт. Клиенты VPN занимают 10808 и соседние, и если
-#    сесть на занятый, в проверку потечёт чужой трафик — а вывод будет
-#    выглядеть как приговор ссылке.
-SOCKS=$(python3 - <<'INNER'
+echo "Без туннеля вы выходите с адреса: $DIRECT"
+
+# 3. Свободный порт под каждую попытку. Клиенты VPN занимают 10808 и
+#    соседние; сядешь на занятый — в проверку потечёт чужой трафик, а
+#    вывод будет выглядеть как приговор ссылке.
+free_port() {
+    python3 - <<'INNER'
 import socket
 for port in range(18080, 18200):
     probe = socket.socket()
@@ -89,60 +93,92 @@ for port in range(18080, 18200):
     print(port)
     break
 INNER
-)
-[ -n "$SOCKS" ] || { echo "Не нашёл свободного порта." >&2; exit 1; }
+}
 
-python3 "$DIR/vless_link.py" "$LINK" --socks "$SOCKS" > "$WORK/client.json"
+field() {
+    python3 "$DIR/vless_link.py" "$1" --show 2>/dev/null | sed -n "s/^$2 *//p"
+}
+
+# 4. По одной ссылке за раз
+try_link() {
+    ONE="$1"
+    SOCKS=$(free_port)
+    [ -n "$SOCKS" ] || { echo "нет свободного порта"; return 1; }
+
+    SERVER=$(field "$ONE" host)
+    printf '  %-22s порт %-6s ... ' "$(field "$ONE" sni)" "$(field "$ONE" port)"
+
+    if ! python3 "$DIR/vless_link.py" "$ONE" --socks "$SOCKS" > "$WORK/client.json" 2>"$WORK/err"; then
+        echo "ссылка не разобралась: $(cat "$WORK/err")"
+        return 2
+    fi
+
+    "$WORK/xray" run -c "$WORK/client.json" > "$WORK/log" 2>&1 &
+    CLIENT=$!
+    sleep 2
+    if ! kill -0 "$CLIENT" 2>/dev/null; then
+        echo "клиент не запустился"
+        tail -5 "$WORK/log" | sed 's/^/      /'
+        CLIENT=""
+        return 1
+    fi
+
+    THROUGH=$(curl -s -m 20 --socks5-hostname "127.0.0.1:$SOCKS" "$CHECK_URL" 2>/dev/null || true)
+
+    # Чужой трафик означает, что порт всё-таки с кем-то делится, и
+    # результат — не про эту ссылку.
+    FOREIGN=$(grep -c 'accepted' "$WORK/log" 2>/dev/null || echo 0)
+
+    kill "$CLIENT" 2>/dev/null
+    wait "$CLIENT" 2>/dev/null || true
+    CLIENT=""
+
+    if [ "$FOREIGN" -gt 6 ]; then
+        echo "порт занят чужим трафиком ($FOREIGN соединений) — закройте VPN-клиент"
+        return 1
+    fi
+    if [ -z "$THROUGH" ]; then
+        echo "НЕТ"
+        return 1
+    fi
+    if [ "$THROUGH" = "$SERVER" ]; then
+        echo "РАБОТАЕТ (вышли с $THROUGH)"
+        return 0
+    fi
+    echo "мимо: вышли с $THROUGH, а сервер $SERVER"
+    return 1
+}
+
 echo
-echo "Ссылка разобрана:"
-python3 "$DIR/vless_link.py" "$LINK" --show | sed 's/^/    /'
-
-# 3. Проход
-echo
-echo "Поднимаю клиента на порту $SOCKS и иду наружу..."
-"$WORK/xray" run -c "$WORK/client.json" > "$WORK/log" 2>&1 &
-CLIENT=$!
-sleep 3
-if ! kill -0 "$CLIENT" 2>/dev/null; then
-    echo "Клиент не запустился:" >&2
-    tail -20 "$WORK/log" >&2
-    exit 1
-fi
-
-SERVER=$(python3 "$DIR/vless_link.py" "$LINK" --show | sed -n 's/^host *//p')
-THROUGH=$(curl -s -m 25 --socks5-hostname "127.0.0.1:$SOCKS" "$CHECK_URL" 2>/dev/null || true)
-
-# Чужой трафик в нашем прокси означает, что порт всё-таки с кем-то
-# делится, и вывод ниже — не про ссылку.
-FOREIGN=$(grep -c 'accepted\|rejected' "$WORK/log" 2>/dev/null || echo 0)
-if [ "$FOREIGN" -gt 12 ]; then
-    echo
-    echo "ВНИМАНИЕ: через проверку прошло $FOREIGN соединений вместо одного."
-    echo "Значит, порт $SOCKS делится с другим приложением — обычно это"
-    echo "работающий VPN-клиент. Закройте его полностью и повторите:"
-    echo "результат ниже не про вашу ссылку."
-    echo
-fi
+echo "=== проверяю ссылки ==="
+WORKED=0
+TRIED=0
+for ONE in "$@"; do
+    set +e
+    try_link "$ONE"
+    CODE=$?
+    set -e
+    # 2 — ссылку не удалось разобрать: клиент даже не запускался, и
+    # такую попытку нельзя считать доводом ни за, ни против сервера.
+    [ "$CODE" = "2" ] || TRIED=$((TRIED + 1))
+    [ "$CODE" = "0" ] && WORKED=$((WORKED + 1))
+done
 
 echo
-if [ -z "$THROUGH" ]; then
-    echo "НЕ ПРОШЛО — туннель не поднялся."
-    echo
-    echo "Последние строки журнала клиента:"
-    tail -20 "$WORK/log" | sed 's/^/    /'
-    echo
-    echo "Без туннеля вы выходите с адреса: $DIRECT"
-    exit 1
-fi
-
-echo "Без туннеля вы выходите с адреса: $DIRECT"
-echo "Через туннель — с адреса:         $THROUGH"
-echo
-if [ "$THROUGH" = "$SERVER" ]; then
-    echo "РАБОТАЕТ. Трафик идёт через сервер $SERVER."
-    echo "Значит, сервер и ссылка исправны, и если у кого-то не"
-    echo "подключается — дело в его приложении или его провайдере."
+if [ "$WORKED" -gt 0 ]; then
+    echo "Прошло ссылок: $WORKED. Сервер и связка исправны."
+    echo "Пришлите строку с пометкой РАБОТАЕТ — переведу основной вход на неё."
+elif [ "$TRIED" = "0" ]; then
+    echo "Ни одну ссылку не удалось разобрать — проверять было нечего."
+    echo "Скорее всего, они обрезались при копировании. Возьмите их заново"
+    echo "и не забудьте кавычки вокруг каждой."
 else
-    echo "Странно: вышли не с адреса сервера ($SERVER). Похоже, трафик пошёл мимо."
-    exit 1
+    echo "Не прошла ни одна из $TRIED, а прямой выход есть ($DIRECT)."
+    echo "Значит, дело не в приложении и не в маскировочном домене:"
+    echo "соединение к этому серверу режут по дороге."
+    if [ -f "$WORK/log" ]; then
+        echo
+        echo "Последние строки журнала последней попытки:"
+        tail -10 "$WORK/log" | sed 's/^/    /'
+    fi
 fi
