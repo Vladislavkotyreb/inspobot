@@ -44,6 +44,12 @@ LINK_SPEC = importlib.util.spec_from_file_location(
 linkmod = importlib.util.module_from_spec(LINK_SPEC)
 LINK_SPEC.loader.exec_module(linkmod)
 
+PATH_SPEC = importlib.util.spec_from_file_location(
+    "vless_path", ROOT / "deploy" / "test-path.py"
+)
+pathmod = importlib.util.module_from_spec(PATH_SPEC)
+PATH_SPEC.loader.exec_module(pathmod)
+
 REACH_SPEC = importlib.util.spec_from_file_location(
     "vless_reach", ROOT / "deploy" / "vless_reach.py"
 )
@@ -702,6 +708,51 @@ class LinkRoundTrip(unittest.TestCase):
         config = linkmod.client_config(without)
         user = config["outbounds"][0]["settings"]["vnext"][0]["users"][0]
         self.assertNotIn("flow", user)
+
+
+class PathVerdict(unittest.TestCase):
+    """Вывод послойной проверки.
+
+    Здесь легко ошибиться в пользу паники: сказать «блокируют», когда
+    просто плохая сеть, — значит отправить человека покупать новый
+    сервер вместо того, чтобы починить настройку. Поэтому каждый слой
+    разбирается отдельно, и для потока нужна точка отсчёта.
+    """
+
+    def result(self, tcp=0.05, tls=0.1, size=200000, stalled=False):
+        return {"tcp": tcp, "tls": tls, "bytes": size, "stalled": stalled}
+
+    def test_нет_tcp(self):
+        answer = pathmod.verdict(self.result(tcp=None, tls=None), self.result(), "d.com")
+        self.assertIn("TCP", answer)
+        self.assertIn("адрес или порт", answer)
+
+    def test_есть_tcp_нет_tls(self):
+        answer = pathmod.verdict(self.result(tls=None), self.result(), "d.com")
+        self.assertIn("рукопожатие", answer)
+        # Важно сказать, что перебор доменов и портов не поможет:
+        # иначе разбор уйдёт на новый круг.
+        self.assertIn("не помогут", answer)
+
+    def test_поток_замирает_только_у_нас(self):
+        answer = pathmod.verdict(
+            self.result(size=17000, stalled=True), self.result(), "d.com"
+        )
+        self.assertIn("17000", answer)
+        self.assertIn("объёму", answer)
+
+    def test_поток_замирает_везде_значит_сеть(self):
+        answer = pathmod.verdict(
+            self.result(stalled=True), self.result(stalled=True), "d.com"
+        )
+        self.assertIn("сети", answer)
+        # Обвинять сервер в этом случае нельзя.
+        self.assertNotIn("объёму", answer)
+
+    def test_всё_прошло(self):
+        answer = pathmod.verdict(self.result(), self.result(), "d.com")
+        self.assertIn("целиком", answer)
+        self.assertIn("туннеле", answer)
 
 
 if __name__ == "__main__":
