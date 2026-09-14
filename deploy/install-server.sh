@@ -67,10 +67,38 @@ HOUR=$(sed -n 's/^INSPOBOT_HOUR=\([0-9][0-9]*\).*/\1/p' .env | tail -1)
 HOUR="${HOUR:-11}"
 MINUTE=$(sed -n 's/^INSPOBOT_MINUTE=\([0-9][0-9]*\).*/\1/p' .env | tail -1)
 MINUTE="${MINUTE:-0}"
+WANT_TZ=$(sed -n 's/^INSPOBOT_TZ=\(.*\)/\1/p' .env | tail -1)
+WANT_TZ="${WANT_TZ:-Europe/Moscow}"
 LINE="$MINUTE $HOUR * * * cd $DIR && .venv/bin/python -m inspobot.daily >> var/cron.log 2>&1"
+
+# Cron живёт по времени сервера и ничего не знает про пояса. Если пояс
+# сервера не тот, в котором вы ждёте письмо, строка «0 11» отработает не в
+# 11:00. Пересчитывать час один раз нельзя: при переходе на летнее время он
+# уедет. Правильный путь — привести пояс сервера к нужному, тогда и переходы
+# отработают сами.
+SERVER_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo "")
+echo
+if [ -n "$SERVER_TZ" ] && [ "$SERVER_TZ" != "$WANT_TZ" ]; then
+    echo "ВНИМАНИЕ: пояс сервера — $SERVER_TZ, а письмо ждём по $WANT_TZ."
+    echo "Cron про пояса не знает, поэтому приведите время сервера к нужному:"
+    echo
+    echo "    sudo timedatectl set-timezone $WANT_TZ"
+    echo
+    echo "и запустите этот скрипт снова. Сейчас на сервере $(date '+%H:%M %Z')."
+    TZ_MISMATCH=1
+else
+    echo "Пояс сервера: ${SERVER_TZ:-неизвестен}, сейчас $(date '+%H:%M %Z') — совпадает с ожидаемым."
+    TZ_MISMATCH=0
+fi
 
 echo
 if [ "$1" = "--cron" ]; then
+    if [ "$TZ_MISMATCH" = "1" ]; then
+        echo "Расписание не ставлю, пока пояса не сойдутся — иначе письмо придёт не вовремя."
+        echo "Строка, которая нужна после смены пояса:"
+        echo "    $LINE"
+        exit 0
+    fi
     if crontab -l 2>/dev/null | grep -q "inspobot.daily"; then
         echo "Строка про inspobot уже есть в crontab — не трогаю."
     else
@@ -79,13 +107,12 @@ if [ "$1" = "--cron" ]; then
         echo "    $LINE"
     fi
     echo
-    echo "ВНИМАНИЕ: время сервера — $(date '+%H:%M %Z')."
-    echo "Если это не ваш пояс, поправьте час в строке crontab вручную."
+    echo "Проверить: crontab -l"
+    echo "Лог запусков: $DIR/var/cron.log"
 else
-    echo "Готово. Осталось расписание — добавьте строку в crontab -e:"
+    echo "Готово. Осталось расписание:"
     echo
     echo "    $LINE"
     echo
-    echo "Время сервера сейчас: $(date '+%H:%M %Z') — сверьте с нужным поясом."
-    echo "Или запустите: sh deploy/install-server.sh --cron"
+    echo "Добавить самому: crontab -e. Или запустить: sh deploy/install-server.sh --cron"
 fi
