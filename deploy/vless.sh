@@ -13,6 +13,7 @@
 #   sudo sh deploy/vless.sh set-domain X   сменить маскировочный домен
 #   sudo sh deploy/vless.sh probe-links    ссылки на несколько доменов сразу
 #   sudo sh deploy/vless.sh probe-clear    убрать пробные входы
+#   sudo sh deploy/vless.sh reach          доходят ли до сервера из России
 #   sudo sh deploy/vless.sh repair         пересобрать конфиг и починить права
 #   sudo sh deploy/vless.sh uninstall      снести Xray
 #
@@ -696,6 +697,21 @@ do_probe_clear() {
     echo "Пробные входы убраны, остался основной."
 }
 
+# Доходят ли до сервера из России. Отвечает на вопрос, который с
+# сервера не решается никак: заблокирован ли сам адрес. Если да —
+# смена маскировочного домена бесполезна, и надо менять адрес.
+do_reach() {
+    need_root reach
+    need_installed
+    HOSTADDR=$(py get host)
+    PORTS="${1:-$(py get port)}"
+    for TRY in $PORTS; do
+        echo "=== порт $TRY ==="
+        python3 "$DIR/vless_reach.py" --host "$HOSTADDR" --port "$TRY" || true
+        echo
+    done
+}
+
 do_status() {
     need_root status
     need_installed
@@ -737,6 +753,7 @@ case "$COMMAND" in
     set-domain) do_set_domain "${1:-}" ;;
     probe-links) do_probe_links "${1:-}" ;;
     probe-clear) do_probe_clear ;;
+    reach)     do_reach "${1:-}" ;;
     uninstall) do_uninstall ;;
     *)         awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0" ;;
 esac

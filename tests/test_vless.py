@@ -38,6 +38,12 @@ DOMAINS_SPEC = importlib.util.spec_from_file_location(
 domains = importlib.util.module_from_spec(DOMAINS_SPEC)
 DOMAINS_SPEC.loader.exec_module(domains)
 
+REACH_SPEC = importlib.util.spec_from_file_location(
+    "vless_reach", ROOT / "deploy" / "vless_reach.py"
+)
+reach = importlib.util.module_from_spec(REACH_SPEC)
+REACH_SPEC.loader.exec_module(reach)
+
 
 def meta(**overrides):
     base = {
@@ -550,6 +556,71 @@ class Domains(unittest.TestCase):
 
     def test_ошибка_отвергается(self):
         self.assertFalse(self.measured(error="timeout").ok)
+
+
+class Reach(unittest.TestCase):
+    """Разбор ответа check-host.net. Сеть не трогаем.
+
+    Цена ошибки здесь высокая: сказать «адрес заблокирован» там, где
+    просто не ответила служба проверки, значит отправить человека
+    менять сервер вместо настройки.
+    """
+
+    NODES = {
+        "ru1.node.check-host.net": ["ru", "Russia", "Moscow", "Ru", 55.7, 37.6],
+        "ru2.node.check-host.net": ["ru", "Russia", "Saint Petersburg"],
+        "de1.node.check-host.net": ["de", "Germany", "Frankfurt"],
+    }
+
+    def test_успех_и_отказ_различаются(self):
+        self.assertEqual(reach.node_verdict([{"address": "1.2.3.4", "time": 0.0421}])[0], True)
+        self.assertEqual(reach.node_verdict([{"error": "Timeout exceeded"}])[0], False)
+
+    def test_время_показывается_в_миллисекундах(self):
+        ok, note = reach.node_verdict([{"address": "1.2.3.4", "time": 0.0421}])
+        self.assertTrue(ok)
+        self.assertEqual(note, "42 мс")
+
+    def test_незаконченный_узел_не_считается_отказом_по_тексту(self):
+        ok, note = reach.node_verdict(None)
+        self.assertFalse(ok)
+        self.assertIn("считает", note)
+
+    def test_мусор_не_ломает_разбор(self):
+        for junk in ([], {}, "строка", [None], [[]], [{"что-то": 1}]):
+            with self.subTest(junk=junk):
+                ok, note = reach.node_verdict(junk)
+                self.assertFalse(ok)
+                self.assertTrue(note)
+
+    def test_страна_и_город(self):
+        self.assertEqual(reach.node_place(["ru", "Russia", "Moscow"]), ("ru", "Moscow"))
+        self.assertEqual(reach.node_place(["RU", "Russia"]), ("ru", ""))
+        # Формат у службы менялся — короткий и кривой не должны падать.
+        self.assertEqual(reach.node_place([]), ("", ""))
+        self.assertEqual(reach.node_place(None), ("", ""))
+
+    def test_сводка_только_по_россии(self):
+        results = {
+            "ru1.node.check-host.net": [{"address": "202.61.225.12", "time": 0.05}],
+            "ru2.node.check-host.net": [{"error": "Connection timed out"}],
+            "de1.node.check-host.net": [{"address": "202.61.225.12", "time": 0.01}],
+        }
+        report = reach.summarize(self.NODES, results, "ru")
+        self.assertEqual(report["total"], 2)
+        self.assertEqual(report["reached"], 1)
+        self.assertEqual([row["city"] for row in report["rows"]], ["Moscow", "Saint Petersburg"])
+
+    def test_все_страны_если_пусто(self):
+        report = reach.summarize(self.NODES, {}, "")
+        self.assertEqual(report["total"], 3)
+        self.assertEqual(report["reached"], 0)
+
+    def test_пропавшие_результаты_не_роняют_сводку(self):
+        # Служба может вернуть меньше узлов, чем обещала.
+        report = reach.summarize(self.NODES, {}, "ru")
+        self.assertEqual(report["reached"], 0)
+        self.assertEqual(report["total"], 2)
 
 
 if __name__ == "__main__":
