@@ -107,6 +107,23 @@ def digest_keyboard() -> dict:
     }
 
 
+# Подписи постоянной клавиатуры. Нажатие на такую кнопку присылает ровно этот
+# текст, поэтому служба узнаёт её по нему — значения обязаны совпадать.
+WEEK_BUTTON = "📅 Топ-10 за неделю"
+MONTH_BUTTON = "🗓 Топ-10 за месяц"
+
+
+def top_reply_keyboard() -> dict:
+    """Постоянная клавиатура в чате: кнопки видны всегда, а не только под
+    сообщением с подборкой. Inline-кнопки живут при своём сообщении и
+    уезжают вверх вместе с ним, эта остаётся внизу."""
+    return {
+        "keyboard": [[{"text": WEEK_BUTTON}, {"text": MONTH_BUTTON}]],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
 def top_header_html(period: str, since: date, until: date, count: int) -> str:
     label = PERIOD_LABEL.get(period, period)
     head = f"<b>Топ-{count} {escape(label)}</b>"

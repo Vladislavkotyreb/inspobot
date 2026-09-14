@@ -235,11 +235,19 @@ class RecordingTest(RunOnceTest):
         self.assertIsNone(header_keyboard)
 
     def test_top_buttons_when_enabled(self):
+        """Клавиатура постоянная, а не inline: inline уезжает вверх вместе с
+        сообщением, а эта остаётся внизу чата."""
+        from inspobot.render import MONTH_BUTTON, WEEK_BUTTON
+
         self.config = Config(**{**self.config.__dict__, "top_buttons": True})
         telegram = FakeTelegram()
         self._run(telegram)
-        rows = telegram.messages[0][2]["inline_keyboard"]
-        self.assertEqual([b["callback_data"] for b in rows[0]], ["top:week", "top:month"])
+        keyboard = telegram.messages[0][2]
+        self.assertNotIn("inline_keyboard", keyboard)
+        self.assertEqual(
+            [b["text"] for b in keyboard["keyboard"][0]], [WEEK_BUTTON, MONTH_BUTTON]
+        )
+        self.assertTrue(keyboard["resize_keyboard"])
 
 
 class BroadcastTest(RunOnceTest):

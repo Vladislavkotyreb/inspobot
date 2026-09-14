@@ -28,7 +28,7 @@ from . import chats as chats_file
 from .profile import WEEKDAY_NAMES, Day, ProfileError, Slot
 from .profile import load as load_schedule
 from .profile import plan_for_day
-from .render import caption_html, digest_keyboard, header_html, pick_keyboard
+from .render import caption_html, header_html, pick_keyboard, top_reply_keyboard
 from .setup_cli import describe
 from .state import SeenScreen, Store
 from .telegram import MEDIA_GROUP_LIMIT, Telegram, TelegramError, _message_id
@@ -135,7 +135,9 @@ async def deliver(
     await telegram.send_message(
         header_html(digest),
         chat_id=chat_id,
-        keyboard=digest_keyboard() if top_buttons else None,
+        # Постоянная клавиатура: появляется сама с первой же подборкой и
+        # остаётся внизу чата, а не уезжает вверх вместе с сообщением.
+        keyboard=top_reply_keyboard() if top_buttons else None,
     )
     delivered: dict[str, list[int]] = {}
     for section in digest.sections:

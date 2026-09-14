@@ -22,7 +22,7 @@ from typing import Any
 from .config import Config
 from .daily import recipients
 from .logs import setup as setup_logging
-from .render import TOP_MONTH, TOP_WEEK
+from .render import MONTH_BUTTON, TOP_MONTH, TOP_WEEK, WEEK_BUTTON, top_reply_keyboard
 from .telegram import Telegram
 from .top import run as run_top
 
@@ -30,6 +30,9 @@ log = logging.getLogger("inspobot.listener")
 
 PERIOD_BY_DATA = {TOP_WEEK: "week", TOP_MONTH: "month"}
 PERIOD_BY_COMMAND = {"/week": "week", "/month": "month"}
+# Нажатие на постоянную клавиатуру приходит обычным сообщением с текстом
+# кнопки — узнаём её по нему.
+PERIOD_BY_BUTTON = {WEEK_BUTTON: "week", MONTH_BUTTON: "month"}
 
 BUSY = "Уже собираю, подождите немного"
 STALE = "Кнопка не опознана — наберите /week или /month"
@@ -38,10 +41,11 @@ STARTED = "Собираю топ"
 
 HELP = (
     "<b>inspobot</b>\n\n"
-    "/week — топ-10 за неделю\n"
-    "/month — топ-10 за месяц\n\n"
-    "То же самое делают кнопки под утренней подборкой. "
-    "Топ собирается из уже присланного и ничего не стоит."
+    "Кнопки внизу показывают лучшее из уже присланного — "
+    "по оценке, которую модель ставит каждой находке при отборе.\n\n"
+    "Это бесплатно: подборка не собирается заново, картинки копируются "
+    "из прежних сообщений.\n\n"
+    "То же самое делают команды /week и /month."
 )
 
 POLL_ERROR_PAUSE = 5
@@ -85,16 +89,26 @@ async def handle_update(
     if not message:
         return
     chat_id = str(message.get("chat", {}).get("id", ""))
-    command = str(message.get("text", "")).strip().split()[0].split("@")[0].lower() \
-        if message.get("text") else ""
-    if not command.startswith("/") or not allowed(config, chat_id):
+    text = str(message.get("text", "")).strip()
+    if not text or not allowed(config, chat_id):
         return
 
-    if command in PERIOD_BY_COMMAND:
-        await telegram.send_message(f"{STARTED}…", chat_id=chat_id)
-        await send_top(config, PERIOD_BY_COMMAND[command], chat_id, lock)
-    elif command in ("/start", "/help"):
-        await telegram.send_message(HELP, chat_id=chat_id)
+    # Нажатие постоянной клавиатуры приходит как обычный текст.
+    period = PERIOD_BY_BUTTON.get(text)
+    if period is None:
+        command = text.split()[0].split("@")[0].lower()
+        period = PERIOD_BY_COMMAND.get(command)
+        if period is None:
+            if command in ("/start", "/help", "/buttons"):
+                # Клавиатура ставится вместе с ответом: показать её иначе
+                # нельзя, она приходит только приложением к сообщению.
+                await telegram.send_message(
+                    HELP, chat_id=chat_id, keyboard=top_reply_keyboard()
+                )
+            return
+
+    await telegram.send_message(f"{STARTED}…", chat_id=chat_id)
+    await send_top(config, period, chat_id, lock)
 
 
 async def poll(config: Config, telegram: Telegram) -> None:

@@ -21,7 +21,7 @@ class FakeTelegram:
         self.answers.append(text)
 
     async def send_message(self, text, chat_id=None, keyboard=None):
-        self.messages.append((text, chat_id))
+        self.messages.append((text, chat_id, keyboard))
         return {"message_id": 1}
 
 
@@ -157,3 +157,70 @@ class AllowedTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplyKeyboardTest(unittest.TestCase):
+    """Постоянная клавиатура: нажатие приходит обычным текстом, и служба
+    обязана узнать его по подписи кнопки."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        for key in list(os.environ):
+            if key.startswith(("INSPOBOT_", "MOBBIN_", "TELEGRAM_", "ANTHROPIC_")):
+                del os.environ[key]
+        self.config = Config(
+            **{
+                **Config.from_env().__dict__,
+                "telegram_token": "t",
+                "telegram_chat_id": "42",
+                "chats_path": Path(self.dir.name) / "chats.txt",
+                "db_path": Path(self.dir.name) / "state.sqlite3",
+            }
+        )
+        self.telegram = FakeTelegram()
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def handle(self, update):
+        with mock.patch.object(listener, "run_top", new=mock.AsyncMock()) as run:
+            asyncio.run(
+                listener.handle_update(self.config, self.telegram, update, asyncio.Lock())
+            )
+        return run
+
+    def test_button_labels_match_between_render_and_listener(self):
+        from inspobot.render import MONTH_BUTTON, WEEK_BUTTON, top_reply_keyboard
+
+        labels = [b["text"] for b in top_reply_keyboard()["keyboard"][0]]
+        self.assertEqual(labels, [WEEK_BUTTON, MONTH_BUTTON])
+        for label in labels:
+            self.assertIn(label, listener.PERIOD_BY_BUTTON, "подпись не опознаётся")
+
+    def test_pressing_the_week_button(self):
+        from inspobot.render import WEEK_BUTTON
+
+        run = self.handle(typed(WEEK_BUTTON))
+        run.assert_awaited_once()
+        self.assertEqual(run.await_args.args[1], "week")
+
+    def test_pressing_the_month_button(self):
+        from inspobot.render import MONTH_BUTTON
+
+        run = self.handle(typed(MONTH_BUTTON))
+        self.assertEqual(run.await_args.args[1], "month")
+
+    def test_start_shows_the_keyboard(self):
+        run = self.handle(typed("/start"))
+        run.assert_not_awaited()
+        keyboard = self.telegram.messages[0][2]
+        self.assertIn("keyboard", keyboard)
+
+    def test_buttons_command_shows_it_too(self):
+        self.handle(typed("/buttons"))
+        self.assertIn("keyboard", self.telegram.messages[0][2])
+
+    def test_foreign_chat_gets_no_keyboard(self):
+        run = self.handle(typed("/start", chat_id="999"))
+        run.assert_not_awaited()
+        self.assertEqual(self.telegram.messages, [])
