@@ -22,6 +22,7 @@ import os
 import re
 import secrets
 import socket
+import sys
 import threading
 import time
 import urllib.parse
@@ -212,9 +213,29 @@ class _CallbackHandler(http.server.BaseHTTPRequestHandler):
 
 
 def _free_port() -> int:
+    """Порт для приёма ответа. Фиксируется через INSPOBOT_AUTH_PORT — это
+    нужно, когда вход проходят на сервере через проброс порта."""
+    forced = os.environ.get("INSPOBOT_AUTH_PORT", "").strip()
+    if forced.isdigit():
+        return int(forced)
     with socket.socket() as sock:
         sock.bind((CALLBACK_HOST, 0))
         return int(sock.getsockname()[1])
+
+
+def parse_callback(text: str) -> dict[str, str]:
+    """Разбор адреса, скопированного из адресной строки браузера.
+
+    На сервере без графики браузер открывают на другой машине, и вернуться на
+    127.0.0.1 сервера он не может — страница не грузится. Но в адресной строке
+    при этом уже лежит и код, и state: их достаточно, чтобы завершить вход
+    вручную. Принимаем и полный адрес, и просто строку запроса.
+    """
+    text = text.strip()
+    if not text:
+        return {}
+    query = urllib.parse.urlparse(text).query or text
+    return {k: v[0] for k, v in urllib.parse.parse_qs(query).items() if v}
 
 
 def _pkce() -> tuple[str, str]:
@@ -314,19 +335,48 @@ def interactive_login(mcp_url: str, token_file: Path, timeout: int = 300) -> Tok
         server = http.server.HTTPServer((CALLBACK_HOST, port), _CallbackHandler)
         server.timeout = timeout
         _CallbackHandler.result = {}
-        thread = threading.Thread(target=server.handle_request, daemon=True)
-        thread.start()
+
+        # Ответ может прийти двумя путями: сам браузер постучится на локальный
+        # порт (когда вход проходят на этой же машине), либо человек вставит
+        # адрес из адресной строки (когда браузер на другой машине). Ждём оба,
+        # что придёт первым — то и берём.
+        done = threading.Event()
+        holder: dict[str, dict[str, str]] = {}
+
+        def serve() -> None:
+            server.handle_request()
+            if _CallbackHandler.result:
+                holder["value"] = _CallbackHandler.result
+                done.set()
+
+        def listen() -> None:
+            try:
+                line = sys.stdin.readline()
+            except Exception:  # noqa: BLE001 — ввода может не быть вовсе
+                return
+            params = parse_callback(line)
+            if params:
+                holder["value"] = params
+                done.set()
+
+        threading.Thread(target=serve, daemon=True).start()
+        threading.Thread(target=listen, daemon=True).start()
 
         print("Откройте ссылку и войдите в Mobbin:\n")
         print(auth_url + "\n")
+        print(
+            "Если браузер на другой машине, после входа он покажет ошибку — это\n"
+            "нормально. Скопируйте адрес из адресной строки (там есть code=) и\n"
+            "вставьте сюда, затем Enter:\n"
+        )
         try:
             webbrowser.open(auth_url)
         except Exception:  # noqa: BLE001 — на сервере браузера просто нет
             pass
 
-        thread.join(timeout)
+        done.wait(timeout)
         server.server_close()
-        result = _CallbackHandler.result
+        result = holder.get("value", {})
         if not result:
             raise MobbinAuthError("Ответ от Mobbin не пришёл: истекло время ожидания.")
         if "error" in result:

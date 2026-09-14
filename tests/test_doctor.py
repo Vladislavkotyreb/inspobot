@@ -251,3 +251,35 @@ class SpentRefreshTokenTest(unittest.TestCase):
             save_tokens(path, Tokens("a", "r", time.time() - 10, "cid", "", "https://as/t"))
             config = Config(**{**Config.from_env().__dict__, "mobbin_token_file": path})
             self.assertEqual(doctor.check_mobbin(config).status, doctor.WARN)
+
+
+class ParseCallbackTest(unittest.TestCase):
+    """Вход на сервере без графики: адрес возврата приходится вставлять руками."""
+
+    def test_full_url(self):
+        from inspobot.mobbin_auth import parse_callback
+
+        got = parse_callback("http://127.0.0.1:49319/callback?code=abc123&state=xyz")
+        self.assertEqual(got, {"code": "abc123", "state": "xyz"})
+
+    def test_bare_query_string(self):
+        from inspobot.mobbin_auth import parse_callback
+
+        self.assertEqual(parse_callback("code=abc&state=xyz")["code"], "abc")
+
+    def test_surrounding_whitespace_and_newline(self):
+        from inspobot.mobbin_auth import parse_callback
+
+        self.assertEqual(parse_callback("  http://x/cb?code=a&state=b\n")["state"], "b")
+
+    def test_error_answer_survives(self):
+        from inspobot.mobbin_auth import parse_callback
+
+        got = parse_callback("http://127.0.0.1/callback?error=access_denied")
+        self.assertEqual(got["error"], "access_denied")
+
+    def test_empty_input_is_not_an_answer(self):
+        from inspobot.mobbin_auth import parse_callback
+
+        self.assertEqual(parse_callback(""), {})
+        self.assertEqual(parse_callback("   \n"), {})
