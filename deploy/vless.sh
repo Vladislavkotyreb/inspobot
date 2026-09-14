@@ -14,6 +14,7 @@
 #   sudo sh deploy/vless.sh probe-links    ссылки на несколько доменов сразу
 #   sudo sh deploy/vless.sh probe-clear    убрать пробные входы
 #   sudo sh deploy/vless.sh reach          доходят ли до сервера из России
+#   sudo sh deploy/vless.sh watch          смотреть, что приходит на сервер
 #   sudo sh deploy/vless.sh repair         пересобрать конфиг и починить права
 #   sudo sh deploy/vless.sh uninstall      снести Xray
 #
@@ -712,6 +713,40 @@ do_reach() {
     done
 }
 
+# Смотреть, что приходит на сервер прямо сейчас. Это разделяет две
+# причины, которые снаружи выглядят одинаково: «до сервера не доходит»
+# и «доходит, но сервер отвергает». Пока этого не видно, любой разбор —
+# гадание.
+do_watch() {
+    need_root watch
+    need_installed
+    SECONDS_TO_WATCH="${1:-180}"
+
+    restore() {
+        py render >/dev/null 2>&1 && systemctl restart xray 2>/dev/null
+        echo
+        echo "Журнал сервера возвращён в обычный режим."
+    }
+    trap restore EXIT INT TERM
+
+    py render --loglevel info >/dev/null
+    systemctl restart xray
+    sleep 1
+
+    echo "=== слушаю $SECONDS_TO_WATCH секунд ==="
+    echo "Сейчас запустите проверку с другого компьютера. Что увижу:"
+    echo
+    echo "  строки REALITY  — ваш ClientHello ДОШЁЛ, сервер его отверг;"
+    echo "  «received request» — туннель поднялся;"
+    echo "  тишина          — до сервера не дошло ничего."
+    echo
+    timeout "$SECONDS_TO_WATCH" journalctl -u xray -f -n 0 --no-pager 2>/dev/null \
+        | grep --line-buffered -E 'REALITY|received request|rejected|failed' \
+        | sed 's/^/  /' || true
+    echo
+    echo "=== время вышло ==="
+}
+
 do_status() {
     need_root status
     need_installed
@@ -754,6 +789,7 @@ case "$COMMAND" in
     probe-links) do_probe_links "${1:-}" ;;
     probe-clear) do_probe_clear ;;
     reach)     do_reach "${1:-}" ;;
+    watch)     do_watch "${1:-}" ;;
     uninstall) do_uninstall ;;
     *)         awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0" ;;
 esac
