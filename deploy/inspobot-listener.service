@@ -1,0 +1,17 @@
+[Unit]
+Description=inspobot — кнопки «Топ-10» в Telegram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/inspobot
+ExecStart=/root/inspobot/.venv/bin/python -m inspobot.listener
+EnvironmentFile=/root/inspobot/.env
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

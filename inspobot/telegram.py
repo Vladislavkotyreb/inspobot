@@ -144,6 +144,17 @@ class Telegram:
             log.warning("Не удалось отправить %s: %s", image_url, exc)
             return None
 
+    async def answer_callback(self, callback_id: str, text: str = "") -> None:
+        """Ответ на нажатие. Без него Telegram крутит спиннер до таймаута,
+        и человек думает, что кнопка сломалась."""
+        try:
+            await self._call(
+                "answerCallbackQuery", {"callback_query_id": callback_id, "text": text}
+            )
+        except TelegramError as exc:
+            # Просроченному нажатию отвечать уже некому — это не повод падать.
+            log.info("answerCallbackQuery: %s", exc)
+
     async def pause(self) -> None:
         await asyncio.sleep(SEND_PAUSE)
 

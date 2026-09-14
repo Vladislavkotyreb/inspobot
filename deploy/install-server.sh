@@ -109,6 +109,23 @@ if [ "$1" = "--cron" ]; then
     echo
     echo "Проверить: crontab -l"
     echo "Лог запусков: $DIR/var/cron.log"
+    # Служба кнопок: сервер работает круглосуточно, поэтому нажатия
+    # принимает он сам — внешний ретранслятор не нужен.
+    if command -v systemctl >/dev/null 2>&1; then
+        sed "s|/root/inspobot|$DIR|g" deploy/inspobot-listener.service \
+            > /etc/systemd/system/inspobot-listener.service
+        systemctl daemon-reload
+        systemctl enable --now inspobot-listener >/dev/null 2>&1 || true
+        echo
+        echo "Служба кнопок: $(systemctl is-active inspobot-listener 2>/dev/null || echo нет)"
+        echo "Логи: journalctl -u inspobot-listener -f"
+        if ! grep -q '^INSPOBOT_TOP_BUTTONS=1' .env; then
+            echo
+            echo "Кнопки под подборкой пока выключены. Включить:"
+            echo "    sed -i 's|^#* *INSPOBOT_TOP_BUTTONS=.*|INSPOBOT_TOP_BUTTONS=1|' .env"
+            echo "    grep INSPOBOT_TOP_BUTTONS .env || echo INSPOBOT_TOP_BUTTONS=1 >> .env"
+        fi
+    fi
 else
     echo "Готово. Осталось расписание:"
     echo

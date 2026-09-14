@@ -37,59 +37,43 @@
 
 **3. Кнопками под шапкой дайджеста.** Вот здесь нужна одна оговорка.
 
-## Почему кнопкам нужен ретранслятор
+## Кнопки
 
-Дайджест живёт в GitHub Actions и между запусками не существует. Нажатие на
-кнопку в Telegram — это входящий запрос, а Actions входящих запросов не
-принимает. Значит, нужен кто-то маленький и вечно живой, кто примет нажатие и
-дёрнет GitHub. Это [`deploy/cloudflare-worker.js`](../deploy/cloudflare-worker.js):
-тридцать строк логики на бесплатном тарифе Cloudflare, без карты.
+Нажатие на кнопку — входящее событие, и его должен кто-то принять. На сервере,
+который и так работает круглосуточно, для этого хватает маленькой службы:
+`inspobot.listener` держит длинный опрос Telegram и на нажатие запускает тот же
+`inspobot.top`.
 
-Схема: кнопка → Telegram → Worker → `repository_dispatch` → Actions запускает
-`inspobot.top` → топ приходит в чат. Задержка — около минуты: столько Actions
-поднимает раннер.
-
-Без ретранслятора кнопки не нужны вовсе — они бы висели мёртвыми. Поэтому по
-умолчанию их нет; включаются переменной `INSPOBOT_TOP_BUTTONS=1` после того,
-как ретранслятор заработал.
-
-## Настройка ретранслятора
-
-**Токен GitHub.** Settings → Developer settings → Fine-grained tokens →
-Generate: только репозиторий `inspobot`, права **Contents: Read and write**
-(так требует `repository_dispatch`). Это отдельный токен, не тот, что для
-секретов.
-
-**Worker.** [dash.cloudflare.com](https://dash.cloudflare.com) → Workers &
-Pages → Create → Hello World → Deploy, затем Edit code: вставить содержимое
-`deploy/cloudflare-worker.js`, Deploy. Адрес будет вида
-`https://inspobot.ВАШЕ-ИМЯ.workers.dev`.
-
-**Переменные воркера.** Settings → Variables and Secrets, все как Secret:
-
-| Имя | Значение |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | токен бота |
-| `TELEGRAM_WEBHOOK_SECRET` | любая длинная случайная строка, например `openssl rand -hex 24` |
-| `GITHUB_TOKEN` | токен из первого шага |
-| `GITHUB_REPO` | `Vladislavkotyreb/inspobot` |
-| `ALLOWED_CHATS` | необязательно: `458337792,-1001234567` |
-
-**Вебхук.** Одна команда с Мака — сообщить Telegram, куда слать нажатия:
+Ставится вместе с расписанием:
 
 ```bash
-curl -sS "https://api.telegram.org/bot<ТОКЕН_БОТА>/setWebhook" \
-  -d "url=https://inspobot.ВАШЕ-ИМЯ.workers.dev" \
-  -d "secret_token=<ТА_ЖЕ_СТРОКА_ЧТО_В_TELEGRAM_WEBHOOK_SECRET>" \
-  -d 'allowed_updates=["callback_query"]'
+sh deploy/install-server.sh --cron
 ```
 
-Ответ `{"ok":true,...}`. `allowed_updates` ограничивает поток одними
-нажатиями — сообщения и всё прочее воркеру не приходят.
+Проверить и посмотреть логи:
 
-**Кнопки.** В репозитории Settings → Secrets and variables → Actions →
-Variables → `INSPOBOT_TOP_BUTTONS` = `1`. Со следующего дайджеста под шапкой
-появятся две кнопки.
+```bash
+systemctl status inspobot-listener
+journalctl -u inspobot-listener -f
+```
+
+Сами кнопки под шапкой подборки включаются переменной в `.env`:
+
+```
+INSPOBOT_TOP_BUTTONS=1
+```
+
+По умолчанию их нет: без службы они висели бы мёртвыми.
+
+Служба понимает и команды — `/week`, `/month`, `/help`. Полезно, когда кнопка
+осталась в старом сообщении. Второе нажатие, пока топ ещё собирается,
+отбрасывается: десять сообщений в две копии забили бы чат.
+
+Если дайджест живёт не на сервере, а в GitHub Actions, принять нажатие
+некому — там нет постоянного процесса. Для такого случая в
+[`deploy/cloudflare-worker.js`](../deploy/cloudflare-worker.js) лежит
+ретранслятор на бесплатном тарифе Cloudflare: он принимает нажатие и дёргает
+Actions через `repository_dispatch`.
 
 ## Что стоит знать
 
