@@ -54,8 +54,16 @@ sh deploy/install-server.sh
 nano ~/inspobot/.env     # TELEGRAM_BOT_TOKEN и ANTHROPIC_API_KEY
 ```
 
-Токен Mobbin **не** получают на сервере: `auth_cli` открывает браузер, которого
-там нет. Скопируйте файл с рабочей машины:
+Токен Mobbin можно получить прямо на сервере — в два шага, см.
+[MOBBIN_AUTH.md](MOBBIN_AUTH.md):
+
+```bash
+.venv/bin/python -m inspobot.auth_cli --start
+# открыть ссылку в браузере, войти, скопировать адрес из адресной строки
+.venv/bin/python -m inspobot.auth_cli --finish 'ВСТАВИТЬ_АДРЕС'
+```
+
+Либо скопировать готовый файл с рабочей машины:
 
 ```bash
 # с ноутбука, не с сервера

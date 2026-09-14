@@ -414,6 +414,131 @@ def interactive_login(mcp_url: str, token_file: Path, timeout: int = 300) -> Tok
         return tokens
 
 
+# --- вход в два шага (для сервера без браузера) -----------------------------
+#
+# Интерактивный вход держит процесс живым между «открой ссылку» и «вставь
+# ответ»: он ждёт то стука браузера в локальный порт, то строки из ввода. На
+# сервере оба пути хрупкие — браузер стучится не туда, а ввод зависит от того,
+# как ведёт себя терминал. Здесь процесс между шагами не живёт вовсе: первая
+# команда печатает ссылку и кладёт черновик на диск, вторая принимает адрес
+# аргументом и завершает обмен. Ничего не ждёт, нечему зависнуть.
+
+
+@dataclass
+class Pending:
+    """Черновик начатого входа. Без него код из браузера бесполезен."""
+
+    state: str
+    verifier: str
+    client_id: str
+    client_secret: str
+    redirect_uri: str
+    token_endpoint: str
+
+
+def save_pending(path: Path, pending: Pending) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(asdict(pending), indent=2), encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
+def load_pending(path: Path) -> Pending:
+    if not path.exists():
+        raise MobbinAuthError(
+            f"Нет начатого входа ({path}). Сначала выполните:\n"
+            "    python -m inspobot.auth_cli --start"
+        )
+    try:
+        return Pending(**json.loads(path.read_text(encoding="utf-8")))
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise MobbinAuthError(f"Черновик входа {path} повреждён: {exc}") from exc
+
+
+def begin_login(mcp_url: str, pending_file: Path) -> str:
+    """Первый шаг: вернуть ссылку для браузера и запомнить черновик."""
+    with httpx.Client(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        meta = discover(client, mcp_url)
+        scope = " ".join(meta.get("scopes_supported", []) or [])
+        redirect_uri = f"http://{CALLBACK_HOST}:{_free_port()}/callback"
+        client_id, client_secret = register_client(client, meta, redirect_uri, scope)
+
+    verifier, challenge = _pkce()
+    state = secrets.token_urlsafe(24)
+    params = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "resource": mcp_url,
+    }
+    if scope:
+        params["scope"] = scope
+
+    save_pending(
+        pending_file,
+        Pending(
+            state=state,
+            verifier=verifier,
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri,
+            token_endpoint=meta["token_endpoint"],
+        ),
+    )
+    return f"{meta['authorization_endpoint']}?{urllib.parse.urlencode(params)}"
+
+
+def complete_login(
+    mcp_url: str, pending_file: Path, token_file: Path, callback: str
+) -> Tokens:
+    """Второй шаг: принять адрес из браузера и получить токены."""
+    pending = load_pending(pending_file)
+    answer = parse_callback(callback)
+
+    if not answer:
+        raise MobbinAuthError(
+            "В переданном адресе нет ни code, ни ошибки. Нужен адрес целиком, "
+            "из адресной строки браузера — тот, что начинается с http://127.0.0.1:"
+        )
+    if "error" in answer:
+        raise MobbinAuthError(
+            f"Mobbin отказал: {answer['error']} {answer.get('error_description', '')}"
+        )
+    if "code" not in answer:
+        raise MobbinAuthError("В адресе нет параметра code — скопируйте строку целиком.")
+    if answer.get("state") != pending.state:
+        raise MobbinAuthError(
+            "Не совпал state: этот адрес — ответ на другой, более ранний вход. "
+            "Начните заново: python -m inspobot.auth_cli --start"
+        )
+
+    with httpx.Client(timeout=30, follow_redirects=True, headers={"User-Agent": USER_AGENT}) as client:
+        data = _token_request(
+            client,
+            pending.token_endpoint,
+            {
+                "grant_type": "authorization_code",
+                "code": answer["code"],
+                "redirect_uri": pending.redirect_uri,
+                "client_id": pending.client_id,
+                "code_verifier": pending.verifier,
+                "resource": mcp_url,
+            },
+            pending.client_secret,
+        )
+    tokens = _tokens_from_response(
+        data,
+        client_id=pending.client_id,
+        client_secret=pending.client_secret,
+        token_endpoint=pending.token_endpoint,
+    )
+    save_tokens(token_file, tokens)
+    pending_file.unlink(missing_ok=True)
+    return tokens
+
+
 def refresh(tokens: Tokens, mcp_url: str) -> Tokens:
     if not tokens.refresh_token:
         raise MobbinAuthError(
