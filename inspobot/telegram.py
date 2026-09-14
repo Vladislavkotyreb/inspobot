@@ -55,7 +55,16 @@ class Telegram:
     async def _call(
         self, method: str, data: dict[str, Any], files: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        response = await self._client.post(self._url(method), data=data, files=files)
+        try:
+            response = await self._client.post(self._url(method), data=data, files=files)
+        except httpx.HTTPError as exc:
+            # Превращаем сетевой сбой в свою ошибку: у таймаутов httpx текст
+            # часто пустой, и наружу уходило «Ошибка:» без единого слова.
+            raise TelegramError(
+                f"{method}: не достучались до Telegram ({type(exc).__name__}"
+                + (f": {exc}" if str(exc) else "")
+                + ")"
+            ) from exc
         payload: dict[str, Any]
         try:
             payload = response.json()
@@ -139,11 +148,14 @@ class Telegram:
         await asyncio.sleep(SEND_PAUSE)
 
     async def get_updates(self, offset: int, timeout: int = 30) -> list[dict[str, Any]]:
-        response = await self._client.post(
-            self._url("getUpdates"),
-            data={"offset": offset, "timeout": timeout},
-            timeout=httpx.Timeout(timeout + 20.0, connect=15.0),
-        )
+        try:
+            response = await self._client.post(
+                self._url("getUpdates"),
+                data={"offset": offset, "timeout": timeout},
+                timeout=httpx.Timeout(timeout + 20.0, connect=15.0),
+            )
+        except httpx.HTTPError as exc:
+            raise TelegramError(f"getUpdates: {type(exc).__name__}: {exc}") from exc
         payload = response.json()
         if not payload.get("ok"):
             raise TelegramError(f"getUpdates: {payload.get('description')}")

@@ -286,15 +286,20 @@ async def run_once(
 
     pick_ids = remember_picks(store, digest)
     async with Telegram(config.telegram_token, config.telegram_chat_id) as tg:
-        sent, failed = await broadcast(
-            tg,
-            digest,
-            targets,
-            config.image_mode == "document",
-            store=store,
-            pick_ids=pick_ids,
-            top_buttons=config.top_buttons,
-        )
+        try:
+            sent, failed = await broadcast(
+                tg,
+                digest,
+                targets,
+                config.image_mode == "document",
+                store=store,
+                pick_ids=pick_ids,
+                top_buttons=config.top_buttons,
+            )
+        except Exception as exc:  # noqa: BLE001 — запуск должен закрыться, а не повиснуть
+            store.finish_run(run_id, ok=False, error=repr(exc))
+            log.exception("Рассылка сорвалась")
+            raise
         if len(failed) == len(targets):
             error = f"ни один из {len(targets)} чатов не принял подборку"
             store.finish_run(run_id, ok=False, error=error)
@@ -360,7 +365,14 @@ def main(argv: list[str] | None = None) -> int:
             run_once(config, day=day, force=args.force or bool(args.day), dry_run=args.dry_run)
         )
     except Exception as exc:  # noqa: BLE001 — cron читает только код возврата
-        print(f"Ошибка: {exc}", file=sys.stderr)
+        # Тип обязателен: у сетевых таймаутов текст пустой, и без него
+        # сообщение выглядело как «Ошибка:» без объяснений.
+        detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        print(f"Ошибка: {detail}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+
+            traceback.print_exc()
         return 1
     return 0
 

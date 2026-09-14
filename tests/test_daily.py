@@ -354,3 +354,37 @@ class ShowPlanTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NetworkFailureTest(unittest.TestCase):
+    """Сетевой сбой Telegram: у таймаутов httpx пустой текст, и сообщение
+    об ошибке выходило пустым — «Ошибка:» и больше ничего."""
+
+    def test_http_error_becomes_a_named_telegram_error(self):
+        import asyncio as aio
+
+        import httpx
+
+        from inspobot.telegram import Telegram, TelegramError
+
+        async def run():
+            tg = Telegram("t", "42")
+            with mock.patch.object(
+                tg._client, "post", side_effect=httpx.ConnectTimeout("")
+            ):
+                with self.assertRaises(TelegramError) as caught:
+                    await tg.send_message("привет")
+            await tg.close()
+            return str(caught.exception)
+
+        message = aio.run(run())
+        self.assertIn("sendMessage", message)
+        self.assertIn("ConnectTimeout", message, "тип сбоя должен быть виден")
+
+    def test_empty_message_exception_still_prints_its_type(self):
+        import httpx
+
+        exc = httpx.ConnectTimeout("")
+        self.assertEqual(str(exc), "", "предпосылка теста: текст пустой")
+        detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        self.assertEqual(detail, "ConnectTimeout")
