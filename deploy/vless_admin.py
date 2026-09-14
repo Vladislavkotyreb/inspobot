@@ -119,7 +119,7 @@ def service_gid(unit_path: str = UNIT) -> int | None:
 # --- конфиг Xray -----------------------------------------------------
 
 
-def render_config(meta: dict) -> dict:
+def render_config(meta: dict, loglevel: str = "warning") -> dict:
     for key in ("port", "sni", "dest", "private_key", "short_id"):
         if not meta.get(key):
             raise VlessError(f"В шпаргалке нет поля {key!r} — конфиг собрать не из чего.")
@@ -130,7 +130,7 @@ def render_config(meta: dict) -> dict:
     return {
         # access: none — на диске не копится, кто куда ходил. Это и про
         # приватность, и про место: журнал посещений растёт быстро.
-        "log": {"loglevel": "warning", "access": "none"},
+        "log": {"loglevel": loglevel, "access": "none"},
         "inbounds": [
             {
                 "tag": "vless-reality",
@@ -176,8 +176,13 @@ def render_config(meta: dict) -> dict:
     }
 
 
-def write_config(meta: dict, path: str = CONFIG, unit_path: str = UNIT) -> None:
-    text = json.dumps(render_config(meta), ensure_ascii=False, indent=2) + "\n"
+def write_config(
+    meta: dict,
+    path: str = CONFIG,
+    unit_path: str = UNIT,
+    loglevel: str = "warning",
+) -> None:
+    text = json.dumps(render_config(meta, loglevel), ensure_ascii=False, indent=2) + "\n"
     _write(path, text, 0o600)
     gid = service_gid(unit_path)
     if gid is None:
@@ -260,13 +265,23 @@ def link(meta: dict, client: dict) -> str:
     return f"vless://{client['id']}@{host}:{meta['port']}?{query}#{quote(client['name'])}"
 
 
-def client_config(meta: dict, client: dict, socks_port: int = 10808) -> dict:
+def client_config(
+    meta: dict,
+    client: dict,
+    socks_port: int = 10808,
+    address: str | None = None,
+) -> dict:
     """Конфиг клиента для самопроверки.
 
     Тот же туннель, которым пойдёт телефон, только поднятый на самом
     сервере и выведенный в локальный socks. Если через него ходит
     трафик — связка «сервер + ссылка» рабочая, и остаётся один
     подозреваемый: приложение.
+
+    `address` подменяет адрес сервера, не трогая SNI: Reality смотрит
+    на имя, а не на адрес. Через 127.0.0.1 проверяется рукопожатие
+    само по себе, без сети хостера, — та часто не пускает сервер на
+    его же внешний адрес, и проверка врёт про поломку.
     """
     return {
         "log": {"loglevel": "warning"},
@@ -285,7 +300,7 @@ def client_config(meta: dict, client: dict, socks_port: int = 10808) -> dict:
                 "settings": {
                     "vnext": [
                         {
-                            "address": meta["host"],
+                            "address": address or meta["host"],
                             "port": int(meta["port"]),
                             "users": [
                                 {
@@ -343,12 +358,15 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("name")
 
     commands.add_parser("list", help="все клиенты со ссылками")
-    commands.add_parser("render", help="пересобрать конфиг из шпаргалки")
+    rerender = commands.add_parser("render", help="пересобрать конфиг из шпаргалки")
+    rerender.add_argument("--loglevel", default="warning",
+                          choices=["none", "error", "warning", "info", "debug"])
     commands.add_parser("show", help="параметры сервера")
     commands.add_parser("names", help="имена клиентов, по одному в строке")
     selftest = commands.add_parser("client-config", help="конфиг клиента для самопроверки")
     selftest.add_argument("name")
     selftest.add_argument("--socks-port", type=int, default=10808)
+    selftest.add_argument("--address", default=None)
     field = commands.add_parser("get", help="одно поле шпаргалки")
     field.add_argument("field")
 
@@ -390,13 +408,15 @@ def main(argv: list[str] | None = None) -> int:
             for client in clients:
                 print(f"{client['name']}\n{link(meta, client)}\n")
         elif args.command == "render":
-            write_config(meta, args.config)
-            print(f"Конфиг пересобран: {args.config}")
+            write_config(meta, args.config, loglevel=args.loglevel)
+            print(f"Конфиг пересобран: {args.config} (журнал: {args.loglevel})")
         elif args.command == "names":
             for client in meta.get("clients", []):
                 print(client["name"])
         elif args.command == "client-config":
-            config = client_config(meta, find_client(meta, args.name), args.socks_port)
+            config = client_config(
+                meta, find_client(meta, args.name), args.socks_port, args.address
+            )
             print(json.dumps(config, ensure_ascii=False, indent=2))
         elif args.command == "get":
             value = meta.get(args.field)

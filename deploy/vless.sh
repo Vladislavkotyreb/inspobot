@@ -349,10 +349,14 @@ do_check() {
     fi
 }
 
-# Подключение к серверу его же ссылкой, с самого сервера. Поднимаем
-# временный клиент в socks и пробуем через него выйти наружу. Прошло —
-# связка «сервер + ссылка» рабочая целиком, и остаётся один
-# подозреваемый: приложение на телефоне.
+# Проход через туннель с самого сервера — двумя путями.
+#
+# Через 127.0.0.1 проверяется рукопожатие само по себе: Reality
+# смотрит на SNI, а не на адрес, поэтому конфиг проверяется полностью,
+# минуя сеть хостера. Через внешний адрес — то же самое, но так, как
+# это делает телефон. Второе у многих хостеров не проходит никогда:
+# сервер не умеет ходить на свой же внешний адрес. Поэтому важен
+# именно первый путь, а второй — справочно.
 do_selftest() {
     need_root selftest
     need_installed
@@ -362,47 +366,79 @@ do_selftest() {
     [ -n "$NAME" ] || NAME=$(py names | head -1)
     [ -n "$NAME" ] || die "Кого проверяем? sudo sh deploy/vless.sh selftest phone"
 
-    SOCKS=10808
-    if command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q "127.0.0.1:$SOCKS "; then
-        SOCKS=10809
-    fi
-
     WORK=$(mktemp -d)
-    trap 'kill "$CLIENT_PID" 2>/dev/null; rm -rf "$WORK"' EXIT INT TERM
-    py client-config "$NAME" --socks-port "$SOCKS" > "$WORK/client.json"
+    CLIENT_PID=""
+    RESTORE=0
+    cleanup() {
+        [ -n "$CLIENT_PID" ] && kill "$CLIENT_PID" 2>/dev/null
+        # Подробный журнал — только на время разбора: он пишет в syslog
+        # каждое соединение, а это и место, и приватность.
+        if [ "$RESTORE" = "1" ]; then
+            py render >/dev/null 2>&1 && systemctl restart xray 2>/dev/null
+            echo "Журнал сервера возвращён в обычный режим."
+        fi
+        rm -rf "$WORK"
+    }
+    trap cleanup EXIT INT TERM
 
-    xray run -c "$WORK/client.json" > "$WORK/log" 2>&1 &
-    CLIENT_PID=$!
-    sleep 3
-    if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
-        echo "Клиент не запустился:" >&2
-        cat "$WORK/log" >&2
+    # Печатает адрес, с которого вышли наружу, или пусто.
+    attempt() {
+        SOCKS=10808
+        if command -v ss >/dev/null 2>&1 && ss -lnt 2>/dev/null | grep -q "127.0.0.1:$SOCKS "; then
+            SOCKS=10809
+        fi
+        py client-config "$NAME" --socks-port "$SOCKS" --address "$1" > "$WORK/client.json"
+        xray run -c "$WORK/client.json" > "$WORK/log" 2>&1 &
+        CLIENT_PID=$!
+        sleep 3
+        OUT=""
+        if kill -0 "$CLIENT_PID" 2>/dev/null; then
+            OUT=$(curl -s -m 20 --socks5-hostname "127.0.0.1:$SOCKS" https://api.ipify.org 2>/dev/null || true)
+        fi
+        kill "$CLIENT_PID" 2>/dev/null
+        wait "$CLIENT_PID" 2>/dev/null || true
+        CLIENT_PID=""
+        printf '%s' "$OUT"
+    }
+
+    HOSTADDR=$(py get host)
+
+    echo "=== рукопожатие (через 127.0.0.1) ==="
+    LOCAL=$(attempt 127.0.0.1)
+    if [ -n "$LOCAL" ]; then
+        echo "  ok    прошло, вышли с адреса $LOCAL"
+    else
+        echo "  ПЛОХО туннель не встал. Поднимаю подробный журнал и повторяю."
+        SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+        py render --loglevel debug >/dev/null
+        systemctl restart xray
+        RESTORE=1
+        sleep 1
+        attempt 127.0.0.1 >/dev/null
+        echo
+        echo "--- журнал сервера ---"
+        journalctl -u xray --since "$SINCE" --no-pager 2>/dev/null | tail -40 | sed 's/^/    /'
+        echo "--- журнал клиента ---"
+        sed 's/^/    /' "$WORK/log"
+        echo
+        echo "Конфигурация не работает даже внутри машины — дело не в приложении."
         exit 1
     fi
-
-    echo "Иду наружу через туннель клиента «$NAME»..."
-    THROUGH=$(curl -s -m 25 --socks5-hostname "127.0.0.1:$SOCKS" https://api.ipify.org || true)
-    DIRECT=$(py get host)
 
     echo
-    if [ -z "$THROUGH" ]; then
-        echo "НЕ ПРОШЛО. Туннель не поднялся даже с этой машины — дело не в приложении."
-        echo "Журнал клиента:"
-        sed 's/^/    /' "$WORK/log"
-        echo "Журнал сервера:"
-        journalctl -u xray -n 15 --no-pager 2>/dev/null | sed 's/^/    /'
-        exit 1
-    elif [ "$THROUGH" = "$DIRECT" ]; then
-        echo "ПРОШЛО: трафик вышел с адреса $THROUGH, то есть через сервер."
-        echo "Связка «сервер + ссылка» рабочая целиком. Значит, дело в приложении:"
-        echo "импортируйте ссылку из буфера обмена, а не сканированием QR."
-        echo
-        py link "$NAME"
+    echo "=== тот же путь, но через внешний адрес $HOSTADDR ==="
+    EXTERNAL=$(attempt "$HOSTADDR")
+    if [ -n "$EXTERNAL" ]; then
+        echo "  ok    прошло, вышли с адреса $EXTERNAL"
     else
-        echo "Странно: вышли с адреса $THROUGH, а сервер — $DIRECT."
-        echo "Похоже, трафик пошёл мимо туннеля."
-        exit 1
+        echo "  ?     не прошло — у многих хостеров сервер не умеет ходить"
+        echo "        на свой же внешний адрес. Само по себе это не поломка:"
+        echo "        рукопожатие выше прошло, значит конфигурация рабочая."
     fi
+
+    echo
+    echo "Конфигурация сервера исправна. Ссылка для клиента:"
+    py link "$NAME"
 }
 
 do_status() {

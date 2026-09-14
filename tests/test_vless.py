@@ -93,6 +93,14 @@ class RenderConfig(unittest.TestCase):
     def test_журнал_посещений_не_ведётся(self):
         self.assertEqual(vless.render_config(meta())["log"]["access"], "none")
 
+
+    def test_уровень_журнала_меняется(self):
+        # Для разбора полётов нужен debug, в обычной жизни — warning.
+        self.assertEqual(vless.render_config(meta())["log"]["loglevel"], "warning")
+        self.assertEqual(vless.render_config(meta(), "debug")["log"]["loglevel"], "debug")
+        # Журнал посещений выключен при любом уровне.
+        self.assertEqual(vless.render_config(meta(), "debug")["log"]["access"], "none")
+
     def test_без_обязательного_поля_падает_до_записи(self):
         with self.assertRaises(vless.VlessError):
             vless.render_config(meta(private_key=""))
@@ -341,6 +349,25 @@ class ClientConfig(unittest.TestCase):
         config = vless.client_config(meta(port="443"), meta()["clients"][0], "10808")
         self.assertEqual(config["outbounds"][0]["settings"]["vnext"][0]["port"], 443)
         self.assertEqual(config["inbounds"][0]["port"], 10808)
+
+
+    def test_адрес_подменяется_а_sni_нет(self):
+        # Reality смотрит на имя, а не на адрес: через 127.0.0.1
+        # проверяется рукопожатие, минуя сеть хостера.
+        data = meta()
+        config = vless.client_config(data, data["clients"][0], address="127.0.0.1")
+        outbound = config["outbounds"][0]
+        self.assertEqual(outbound["settings"]["vnext"][0]["address"], "127.0.0.1")
+        self.assertEqual(
+            outbound["streamSettings"]["realitySettings"]["serverName"], data["sni"]
+        )
+
+    def test_без_подмены_берётся_адрес_из_шпаргалки(self):
+        data = meta()
+        config = vless.client_config(data, data["clients"][0], address=None)
+        self.assertEqual(
+            config["outbounds"][0]["settings"]["vnext"][0]["address"], data["host"]
+        )
 
 
 if __name__ == "__main__":
