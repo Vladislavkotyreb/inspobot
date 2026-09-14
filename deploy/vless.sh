@@ -11,6 +11,8 @@
 #   sudo sh deploy/vless.sh selftest       пройти через туннель самому
 #   sudo sh deploy/vless.sh diagnose       перебрать варианты, если туннель не встал
 #   sudo sh deploy/vless.sh set-domain X   сменить маскировочный домен
+#   sudo sh deploy/vless.sh probe-links    ссылки на несколько доменов сразу
+#   sudo sh deploy/vless.sh probe-clear    убрать пробные входы
 #   sudo sh deploy/vless.sh repair         пересобрать конфиг и починить права
 #   sudo sh deploy/vless.sh uninstall      снести Xray
 #
@@ -357,6 +359,9 @@ do_check() {
     # домен согласует пост-квантовый гибрид (X25519MLKEM768), прятать
     # становится некуда, и рукопожатие отвергается — при полностью
     # исправных ключах и настройках.
+    # Размер ответа — та самая причина, по которой домен может быть
+    # безупречно доступен и при этом непригоден.
+    python3 "$DIR/vless_domains.py" "$SNI" 2>/dev/null | head -1 | sed 's/^/ /' || true
     GROUP=$(printf '%s\n' "$PROBE" | grep -i 'Negotiated TLS1.3 group' | head -1 | sed 's/.*: //')
     case "$GROUP" in
         "")        say_hmm "группа обмена ключами не показана (старый openssl)" ;;
@@ -628,6 +633,69 @@ do_set_domain() {
     py list
 }
 
+# Несколько пробных входов на запасных портах, каждый со своим
+# маскировочным доменом. Человеку на той стороне отправляются все
+# ссылки разом: какая подключится, тот домен и проходит через его
+# провайдера. Иначе на каждый домен уходит круг переписки.
+do_probe_links() {
+    need_root probe-links
+    need_installed
+    command -v xray >/dev/null 2>&1 || die "Нет xray."
+
+    NAME="${1:-}"
+    [ -n "$NAME" ] || NAME=$(py names | head -1)
+
+    DOMAINS="${VLESS_PROBE_DOMAINS:-www.bing.com www.samsung.com addons.mozilla.org www.apple.com}"
+    LIVE=$(py get sni)
+
+    echo "=== замер доменов ==="
+    echo "Ответ рукопожатия должен уложиться в 8192 Б — предел буфера в Xray 26.x."
+    python3 "$DIR/vless_domains.py" $DOMAINS || true
+
+    echo
+    echo "=== проверка рукопожатием ==="
+    PAIRS=""
+    NEXT=8443
+    for CANDIDATE in $DOMAINS; do
+        [ "$CANDIDATE" = "$LIVE" ] && continue
+        while ss -lnt 2>/dev/null | grep -q ":$NEXT "; do NEXT=$((NEXT + 1)); done
+        printf '  %s ... ' "$CANDIDATE"
+        if probe_domain "$CANDIDATE"; then
+            echo "годится, порт $NEXT"
+            PAIRS="$PAIRS $CANDIDATE:$NEXT"
+            NEXT=$((NEXT + 1))
+        else
+            echo "рукопожатие не собирается — пропускаю"
+        fi
+    done
+
+    if [ -z "$PAIRS" ]; then
+        die "Ни один пробный домен не подошёл."
+    fi
+
+    py set-alts $PAIRS >/dev/null
+    restart_xray
+
+    echo
+    echo "=== отправьте эти ссылки тому, у кого не подключается ==="
+    echo "Пусть импортирует ВСЕ и попробует по очереди. Которая заработает —"
+    echo "пришлите её название, переведу основной вход на этот домен."
+    echo
+    echo "рабочий сейчас: $LIVE (порт $PORT)"
+    py link "$NAME"
+    echo
+    py alt-links "$NAME"
+    echo "Убрать пробные входы потом: sudo sh deploy/vless.sh probe-clear"
+}
+
+do_probe_clear() {
+    need_root probe-clear
+    need_installed
+    py clear-alts
+    restart_xray
+    echo "Пробные входы убраны, остался основной."
+}
+
 do_status() {
     need_root status
     need_installed
@@ -667,6 +735,8 @@ case "$COMMAND" in
     selftest)  do_selftest "${1:-}" ;;
     diagnose)  do_diagnose "${1:-}" ;;
     set-domain) do_set_domain "${1:-}" ;;
+    probe-links) do_probe_links "${1:-}" ;;
+    probe-clear) do_probe_clear ;;
     uninstall) do_uninstall ;;
     *)         awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0" ;;
 esac

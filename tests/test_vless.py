@@ -32,6 +32,12 @@ PROBE_SPEC = importlib.util.spec_from_file_location(
 probe = importlib.util.module_from_spec(PROBE_SPEC)
 PROBE_SPEC.loader.exec_module(probe)
 
+DOMAINS_SPEC = importlib.util.spec_from_file_location(
+    "vless_domains", ROOT / "deploy" / "vless_domains.py"
+)
+domains = importlib.util.module_from_spec(DOMAINS_SPEC)
+DOMAINS_SPEC.loader.exec_module(domains)
+
 
 def meta(**overrides):
     base = {
@@ -442,6 +448,108 @@ class Probe(unittest.TestCase):
         data = meta()
         with self.assertRaises(SystemExit):
             probe.build(data, data["clients"][0], "такого-нет", 8443, 10808)
+
+
+class Alts(unittest.TestCase):
+    """Пробные входы: несколько доменов на запасных портах.
+
+    Нужны, чтобы человек на той стороне перебрал домены сам, импортировав
+    несколько ссылок, а не ждал круга переписки на каждый.
+    """
+
+    def with_alts(self):
+        return meta(alts=[
+            {"sni": "www.bing.com", "port": 8443},
+            {"sni": "www.samsung.com", "port": 8444},
+        ])
+
+    def test_на_каждый_вход_свой_inbound(self):
+        config = vless.render_config(self.with_alts())
+        self.assertEqual(len(config["inbounds"]), 3)
+        ports = [inbound["port"] for inbound in config["inbounds"]]
+        self.assertEqual(ports, [443, 8443, 8444])
+
+    def test_ключи_и_клиенты_общие(self):
+        # Иначе пробный вход проверял бы не то, что основной.
+        config = vless.render_config(self.with_alts())
+        first = config["inbounds"][0]
+        for inbound in config["inbounds"][1:]:
+            self.assertEqual(
+                inbound["streamSettings"]["realitySettings"]["privateKey"],
+                first["streamSettings"]["realitySettings"]["privateKey"],
+            )
+            self.assertEqual(
+                inbound["streamSettings"]["realitySettings"]["shortIds"],
+                first["streamSettings"]["realitySettings"]["shortIds"],
+            )
+            self.assertEqual(inbound["settings"]["clients"], first["settings"]["clients"])
+
+    def test_домен_и_dest_совпадают_на_каждом_входе(self):
+        # Клиент проверяет сертификат по SNI: разъедутся — рукопожатие
+        # не соберётся именно на пробном входе, и разбор уйдёт не туда.
+        for inbound in vless.render_config(self.with_alts())["inbounds"]:
+            reality = inbound["streamSettings"]["realitySettings"]
+            self.assertEqual(reality["dest"], reality["serverNames"][0] + ":443")
+
+    def test_теги_различаются(self):
+        tags = [inbound["tag"] for inbound in vless.render_config(self.with_alts())["inbounds"]]
+        self.assertEqual(len(set(tags)), len(tags))
+
+    def test_ссылка_на_пробный_вход(self):
+        data = self.with_alts()
+        client = data["clients"][0]
+        url = vless.link(data, client, data["alts"][0])
+        parsed = urlparse(url)
+        self.assertEqual(parsed.port, 8443)
+        query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        self.assertEqual(query["sni"], "www.bing.com")
+        # Имя в хвосте отличает ссылки друг от друга в списке клиента.
+        self.assertTrue(url.endswith("#vlad-iphone-www.bing.com"), url)
+
+    def test_основная_ссылка_не_изменилась(self):
+        data = self.with_alts()
+        client = data["clients"][0]
+        self.assertEqual(vless.link(data, client), vless.link(meta(), client))
+
+    def test_без_пробных_входов_конфиг_прежний(self):
+        self.assertEqual(len(vless.render_config(meta())["inbounds"]), 1)
+
+
+class Domains(unittest.TestCase):
+    """Замер доменов. Сеть не трогаем — проверяем разбор результата."""
+
+    def measured(self, **fields):
+        item = domains.Measurement(fields.get("host", "example.com"))
+        item.bytes = fields.get("bytes", 3000)
+        item.version = fields.get("version", "TLSv1.3")
+        item.error = fields.get("error", "")
+        return item
+
+    def test_предел_совпадает_с_кодом_reality(self):
+        # tls.go:140 в github.com/xtls/reality: size = 8192.
+        self.assertEqual(domains.LIMIT, 8192)
+        self.assertLess(domains.SAFE, domains.LIMIT)
+
+    def test_большой_ответ_отвергается(self):
+        # www.microsoft.com отдаёт ~8273 Б и рвёт рукопожатие.
+        item = self.measured(bytes=8273)
+        self.assertFalse(item.ok)
+        self.assertIn("8192", item.verdict)
+
+    def test_ровно_на_пределе_проходит(self):
+        self.assertTrue(self.measured(bytes=domains.LIMIT).ok)
+        self.assertFalse(self.measured(bytes=domains.LIMIT + 1).ok)
+
+    def test_впритык_отмечается_но_не_отвергается(self):
+        item = self.measured(bytes=domains.SAFE + 1)
+        self.assertTrue(item.ok)
+        self.assertIn("впритык", item.verdict)
+
+    def test_не_tls13_отвергается(self):
+        self.assertFalse(self.measured(version="TLSv1.2").ok)
+
+    def test_ошибка_отвергается(self):
+        self.assertFalse(self.measured(error="timeout").ok)
 
 
 if __name__ == "__main__":

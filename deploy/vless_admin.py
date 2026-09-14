@@ -119,6 +119,38 @@ def service_gid(unit_path: str = UNIT) -> int | None:
 # --- конфиг Xray -----------------------------------------------------
 
 
+def _inbound(meta: dict, tag: str, port: int, sni: str, clients: list) -> dict:
+    """Один вход REALITY. Ключи и клиенты общие у всех входов: меняется
+    только порт и домен, за которым вход прячется."""
+    return {
+        "tag": tag,
+        "listen": "0.0.0.0",
+        "port": int(port),
+        "protocol": "vless",
+        "settings": {"clients": clients, "decryption": "none"},
+        "streamSettings": {
+            "network": "tcp",
+            "security": "reality",
+            "realitySettings": {
+                "show": False,
+                "dest": f"{sni}:443",
+                "xver": 0,
+                "serverNames": [sni],
+                "privateKey": meta["private_key"],
+                "shortIds": [meta["short_id"]],
+            },
+        },
+        # routeOnly: распознанный домен идёт только в правила
+        # маршрутизации, адрес соединения остаётся исходным.
+        # Без этого ломаются подключения по голому IP.
+        "sniffing": {
+            "enabled": True,
+            "destOverride": ["http", "tls", "quic"],
+            "routeOnly": True,
+        },
+    }
+
+
 def render_config(meta: dict, loglevel: str = "warning") -> dict:
     for key in ("port", "sni", "dest", "private_key", "short_id"):
         if not meta.get(key):
@@ -127,39 +159,19 @@ def render_config(meta: dict, loglevel: str = "warning") -> dict:
         {"id": client["id"], "flow": FLOW, "email": client["name"]}
         for client in meta.get("clients", [])
     ]
+    # Основной вход плюс пробные: они нужны, чтобы человек на той
+    # стороне перебрал домены сам, импортировав несколько ссылок, а не
+    # ждал круга переписки на каждый.
+    inbounds = [_inbound(meta, "vless-reality", meta["port"], meta["sni"], clients)]
+    for index, alt in enumerate(meta.get("alts", []), start=1):
+        inbounds.append(
+            _inbound(meta, f"vless-proba-{index}", alt["port"], alt["sni"], clients)
+        )
     return {
         # access: none — на диске не копится, кто куда ходил. Это и про
         # приватность, и про место: журнал посещений растёт быстро.
         "log": {"loglevel": loglevel, "access": "none"},
-        "inbounds": [
-            {
-                "tag": "vless-reality",
-                "listen": "0.0.0.0",
-                "port": int(meta["port"]),
-                "protocol": "vless",
-                "settings": {"clients": clients, "decryption": "none"},
-                "streamSettings": {
-                    "network": "tcp",
-                    "security": "reality",
-                    "realitySettings": {
-                        "show": False,
-                        "dest": meta["dest"],
-                        "xver": 0,
-                        "serverNames": [meta["sni"]],
-                        "privateKey": meta["private_key"],
-                        "shortIds": [meta["short_id"]],
-                    },
-                },
-                # routeOnly: распознанный домен идёт только в правила
-                # маршрутизации, адрес соединения остаётся исходным.
-                # Без этого ломаются подключения по голому IP.
-                "sniffing": {
-                    "enabled": True,
-                    "destOverride": ["http", "tls", "quic"],
-                    "routeOnly": True,
-                },
-            }
-        ],
+        "inbounds": inbounds,
         "outbounds": [
             {"tag": "direct", "protocol": "freedom"},
             {"tag": "block", "protocol": "blackhole"},
@@ -246,10 +258,13 @@ def find_client(meta: dict, name: str) -> dict:
 # --- ссылка ----------------------------------------------------------
 
 
-def link(meta: dict, client: dict) -> str:
+def link(meta: dict, client: dict, alt: dict | None = None) -> str:
     host = meta["host"]
     if ":" in host:  # IPv6 в URL берётся в квадратные скобки
         host = f"[{host}]"
+    port = alt["port"] if alt else meta["port"]
+    sni = alt["sni"] if alt else meta["sni"]
+    label = f"{client['name']}-{sni}" if alt else client["name"]
     params = {
         "type": "tcp",
         "security": "reality",
@@ -257,12 +272,12 @@ def link(meta: dict, client: dict) -> str:
         "flow": FLOW,
         "pbk": meta["public_key"],
         "fp": FINGERPRINT,
-        "sni": meta["sni"],
+        "sni": sni,
         "sid": meta["short_id"],
         "spx": "/",
     }
     query = urlencode(params, quote_via=quote, safe="")
-    return f"vless://{client['id']}@{host}:{meta['port']}?{query}#{quote(client['name'])}"
+    return f"vless://{client['id']}@{host}:{port}?{query}#{quote(label)}"
 
 
 def client_config(
@@ -365,6 +380,11 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("names", help="имена клиентов, по одному в строке")
     domain = commands.add_parser("set-domain", help="сменить маскировочный домен")
     domain.add_argument("domain")
+    alts = commands.add_parser("set-alts", help="пробные входы: домен:порт …")
+    alts.add_argument("pairs", nargs="+")
+    commands.add_parser("clear-alts", help="убрать пробные входы")
+    altlinks = commands.add_parser("alt-links", help="ссылки на пробные входы")
+    altlinks.add_argument("name")
     selftest = commands.add_parser("client-config", help="конфиг клиента для самопроверки")
     selftest.add_argument("name")
     selftest.add_argument("--socks-port", type=int, default=10808)
@@ -412,6 +432,28 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "render":
             write_config(meta, args.config, loglevel=args.loglevel)
             print(f"Конфиг пересобран: {args.config} (журнал: {args.loglevel})")
+        elif args.command == "set-alts":
+            alternatives = []
+            for pair in args.pairs:
+                if ":" not in pair:
+                    raise VlessError(f"Нужно домен:порт, а не {pair!r}.")
+                sni, _, port = pair.rpartition(":")
+                if not sni or not port.isdigit():
+                    raise VlessError(f"Нужно домен:порт, а не {pair!r}.")
+                alternatives.append({"sni": sni, "port": int(port)})
+            meta["alts"] = alternatives
+            _apply(meta, args.config, args.meta)
+            print(f"Пробных входов: {len(alternatives)}")
+        elif args.command == "clear-alts":
+            meta["alts"] = []
+            _apply(meta, args.config, args.meta)
+            print("Пробные входы убраны.")
+        elif args.command == "alt-links":
+            client = find_client(meta, args.name)
+            for alt in meta.get("alts", []):
+                print(f"{alt['sni']} (порт {alt['port']})")
+                print(link(meta, client, alt))
+                print()
         elif args.command == "set-domain":
             meta["sni"] = args.domain
             meta["dest"] = f"{args.domain}:443"
