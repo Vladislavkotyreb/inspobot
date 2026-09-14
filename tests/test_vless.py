@@ -38,6 +38,12 @@ DOMAINS_SPEC = importlib.util.spec_from_file_location(
 domains = importlib.util.module_from_spec(DOMAINS_SPEC)
 DOMAINS_SPEC.loader.exec_module(domains)
 
+LINK_SPEC = importlib.util.spec_from_file_location(
+    "vless_link", ROOT / "deploy" / "vless_link.py"
+)
+linkmod = importlib.util.module_from_spec(LINK_SPEC)
+LINK_SPEC.loader.exec_module(linkmod)
+
 REACH_SPEC = importlib.util.spec_from_file_location(
     "vless_reach", ROOT / "deploy" / "vless_reach.py"
 )
@@ -621,6 +627,81 @@ class Reach(unittest.TestCase):
         report = reach.summarize(self.NODES, {}, "ru")
         self.assertEqual(report["reached"], 0)
         self.assertEqual(report["total"], 2)
+
+
+class LinkRoundTrip(unittest.TestCase):
+    """Ссылка → конфиг клиента.
+
+    Главный инвариант: конфиг, собранный из ссылки, должен совпадать с
+    тем, что сервер собирает из шпаргалки. Разойдутся — проверка
+    настоящим клиентом начнёт проверять не то, что уехало человеку.
+    """
+
+    def test_разбор_совпадает_со_шпаргалкой(self):
+        data = meta()
+        client = data["clients"][0]
+        parsed = linkmod.parse(vless.link(data, client))
+        self.assertEqual(parsed["id"], client["id"])
+        self.assertEqual(parsed["host"], data["host"])
+        self.assertEqual(parsed["port"], data["port"])
+        self.assertEqual(parsed["sni"], data["sni"])
+        self.assertEqual(parsed["pbk"], data["public_key"])
+        self.assertEqual(parsed["sid"], data["short_id"])
+        self.assertEqual(parsed["flow"], vless.FLOW)
+        self.assertEqual(parsed["fp"], vless.FINGERPRINT)
+        self.assertEqual(parsed["name"], client["name"])
+
+    def test_конфиг_из_ссылки_совпадает_с_конфигом_из_шпаргалки(self):
+        data = meta()
+        client = data["clients"][0]
+        from_link = linkmod.client_config(vless.link(data, client), 10808)
+        from_meta = vless.client_config(data, client, 10808)
+        left = from_link["outbounds"][0]
+        right = from_meta["outbounds"][0]
+        self.assertEqual(
+            left["settings"]["vnext"][0]["users"][0],
+            right["settings"]["vnext"][0]["users"][0],
+        )
+        for field in ("serverName", "fingerprint", "publicKey", "shortId", "spiderX"):
+            self.assertEqual(
+                left["streamSettings"]["realitySettings"][field],
+                right["streamSettings"]["realitySettings"][field],
+                field,
+            )
+
+    def test_ссылка_пробного_входа_разбирается(self):
+        data = meta(alts=[{"sni": "www.bing.com", "port": 8443}])
+        parsed = linkmod.parse(vless.link(data, data["clients"][0], data["alts"][0]))
+        self.assertEqual(parsed["port"], 8443)
+        self.assertEqual(parsed["sni"], "www.bing.com")
+
+    def test_socks_только_на_петле(self):
+        data = meta()
+        config = linkmod.client_config(vless.link(data, data["clients"][0]))
+        self.assertEqual(config["inbounds"][0]["listen"], "127.0.0.1")
+
+    def test_обрезанная_ссылка_отвергается_понятно(self):
+        # Ссылку постоянно теряют по дороге: копируют не целиком,
+        # обрезают в мессенджере, криво сканируют QR.
+        data = meta()
+        full = vless.link(data, data["clients"][0])
+        for broken, hint in (
+            (full.split("&pbk=")[0], "pbk"),
+            (full.replace("security=reality", "security=tls"), "REALITY"),
+            ("https://example.com", "vless://"),
+            ("vless://@1.2.3.4:443?security=reality&pbk=x", "идентификатор"),
+        ):
+            with self.subTest(hint=hint):
+                with self.assertRaises(linkmod.LinkError) as caught:
+                    linkmod.parse(broken)
+                self.assertIn(hint, str(caught.exception))
+
+    def test_флоу_без_vision_не_ломает(self):
+        data = meta()
+        without = vless.link(data, data["clients"][0]).replace("&flow=xtls-rprx-vision", "")
+        config = linkmod.client_config(without)
+        user = config["outbounds"][0]["settings"]["vnext"][0]["users"][0]
+        self.assertNotIn("flow", user)
 
 
 if __name__ == "__main__":
