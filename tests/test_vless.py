@@ -796,6 +796,32 @@ class Fingerprint(unittest.TestCase):
         after = json.dumps(vless.render_config(meta(fingerprint="ios")), sort_keys=True)
         self.assertEqual(before, after)
 
+    def test_суффикс_метки(self):
+        data = meta()
+        url = vless.link(data, data["clients"][0], label_suffix="-safari")
+        self.assertTrue(url.endswith("#vlad-iphone-safari"), url)
+
+    def test_fp_links_пять_отпечатков_одна_связка(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "h", "--port", "443", "--sni", "s",
+                    "--dest", "s:443", "--private-key", "P", "--public-key", "U",
+                    "--short-id", "a", "--client", "one")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(vless.main(common + ["fp-links", "one"]), 0)
+            urls = [line for line in out.getvalue().splitlines() if line.startswith("vless://")]
+            self.assertEqual(len(urls), 5)
+            fps = [linkmod.parse(u)["fp"] for u in urls]
+            self.assertEqual(fps, ["chrome", "safari", "firefox", "ios", "randomized"])
+            # Всё, кроме отпечатка и метки, одинаково: иначе перебор
+            # проверяет не одну переменную, а несколько сразу.
+            keys = {(linkmod.parse(u)["id"], linkmod.parse(u)["port"], linkmod.parse(u)["sni"],
+                     linkmod.parse(u)["pbk"], linkmod.parse(u)["sid"]) for u in urls}
+            self.assertEqual(len(keys), 1)
+            self.assertTrue(all(linkmod.parse(u)["name"].endswith(fp) for u, fp in zip(urls, fps)))
+
     def test_cli_отвергает_неизвестный(self):
         with tempfile.TemporaryDirectory() as directory:
             config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"

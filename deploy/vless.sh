@@ -12,6 +12,7 @@
 #   sudo sh deploy/vless.sh diagnose       перебрать варианты, если туннель не встал
 #   sudo sh deploy/vless.sh set-domain X   сменить маскировочный домен
 #   sudo sh deploy/vless.sh set-fingerprint X  сменить отпечаток ClientHello
+#   sudo sh deploy/vless.sh fp-links       ссылки с разными отпечатками для перебора
 #   sudo sh deploy/vless.sh probe-links    ссылки на несколько доменов сразу
 #   sudo sh deploy/vless.sh probe-clear    убрать пробные входы
 #   sudo sh deploy/vless.sh reach          доходят ли до сервера из России
@@ -654,6 +655,20 @@ do_set_fingerprint() {
     py list
 }
 
+# Набор ссылок для человека на той стороне: та же связка, меняется
+# только отпечаток ClientHello. Ему нужен только Happ — импортирует все,
+# пробует по очереди, говорит, какая ожила.
+do_fp_links() {
+    need_root fp-links
+    need_installed
+    NAME="${1:-}"
+    [ -n "$NAME" ] || NAME=$(py names | head -1)
+    echo "Одна связка ($(py get sni), порт $(py get port)), пять отпечатков."
+    echo "Отправьте все пять. В Happ метка каждой заканчивается на имя отпечатка."
+    echo
+    py fp-links "$NAME"
+}
+
 do_probe_links() {
     need_root probe-links
     need_installed
@@ -804,6 +819,7 @@ case "$COMMAND" in
     diagnose)  do_diagnose "${1:-}" ;;
     set-domain) do_set_domain "${1:-}" ;;
     set-fingerprint) do_set_fingerprint "${1:-}" ;;
+    fp-links)  do_fp_links "${1:-}" ;;
     probe-links) do_probe_links "${1:-}" ;;
     probe-clear) do_probe_clear ;;
     reach)     do_reach "${1:-}" ;;

@@ -274,7 +274,7 @@ def find_client(meta: dict, name: str) -> dict:
 # --- ссылка ----------------------------------------------------------
 
 
-def link(meta: dict, client: dict, alt: dict | None = None) -> str:
+def link(meta: dict, client: dict, alt: dict | None = None, label_suffix: str = "") -> str:
     host = meta["host"]
     if ":" in host:  # IPv6 в URL берётся в квадратные скобки
         host = f"[{host}]"
@@ -284,6 +284,7 @@ def link(meta: dict, client: dict, alt: dict | None = None) -> str:
     label = client["name"]
     if alt:
         label = f"{client['name']}-{sni}" + ("" if flow else "-novision")
+    label = label + label_suffix
     params = {
         "type": "tcp",
         "security": "reality",
@@ -398,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
                           choices=["none", "error", "warning", "info", "debug"])
     commands.add_parser("show", help="параметры сервера")
     commands.add_parser("names", help="имена клиентов, по одному в строке")
+    fpset = commands.add_parser("fp-links", help="ссылки с разными отпечатками")
+    fpset.add_argument("name")
     domain = commands.add_parser("set-domain", help="сменить маскировочный домен")
     domain.add_argument("domain")
     fingerprint = commands.add_parser("set-fingerprint", help="сменить отпечаток ClientHello")
@@ -491,6 +494,16 @@ def main(argv: list[str] | None = None) -> int:
             meta["dest"] = f"{args.domain}:443"
             _apply(meta, args.config, args.meta)
             print(args.domain)
+        elif args.command == "fp-links":
+            client = find_client(meta, args.name)
+            # chrome — как сейчас; safari/firefox — другой стек TLS;
+            # randomized прячет отпечаток вовсе. Если режут по нему,
+            # какой-то из этих проходит там, где chrome нет.
+            for fp in ("chrome", "safari", "firefox", "ios", "randomized"):
+                variant = {**meta, "fingerprint": fp}
+                print(f"{fp}:")
+                print(link(variant, client, label_suffix=f"-{fp}"))
+                print()
         elif args.command == "names":
             for client in meta.get("clients", []):
                 print(client["name"])
