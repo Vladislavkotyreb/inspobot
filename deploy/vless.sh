@@ -17,6 +17,9 @@
 #   sudo sh deploy/vless.sh probe-clear    убрать пробные входы
 #   sudo sh deploy/vless.sh reach          доходят ли до сервера из России
 #   sudo sh deploy/vless.sh watch          смотреть, что приходит на сервер
+#   sudo sh deploy/vless.sh cdn ДОМЕН      маршрут через Cloudflare
+#   sudo sh deploy/vless.sh cdn-check      проверить, что Cloudflare достаёт до сервера
+#   sudo sh deploy/vless.sh cdn-clear      убрать маршрут через CDN
 #   sudo sh deploy/vless.sh repair         пересобрать конфиг и починить права
 #   sudo sh deploy/vless.sh uninstall      снести Xray
 #
@@ -779,6 +782,128 @@ do_watch() {
     echo "=== время вышло ==="
 }
 
+# Файл должен читаться демоном: тот работает от nobody, и закрытый
+# от root ключ он не откроет — как это уже было с конфигом.
+harden_for_xray() {
+    XUSER=$(sed -n 's/^User=//p' /etc/systemd/system/xray.service 2>/dev/null | head -1)
+    XUSER="${XUSER:-nobody}"
+    XGROUP=$(id -gn "$XUSER" 2>/dev/null || echo nogroup)
+    chown "root:$XGROUP" "$1" 2>/dev/null || true
+    chmod 0640 "$1"
+}
+
+# Маршрут через CDN. Когда DPI режет любой TLS к нашему адресу, до него
+# можно добраться только не ходя на него: человек идёт на адрес
+# Cloudflare — для DPI это обычный сайт, — а Cloudflare ходит сюда.
+# Транспорт XHTTP: он задуман для CDN, а WebSocket в Xray 26 объявлен
+# устаревшим. Сертификат самоподписанный: Cloudflare в режиме Full
+# принимает любой, а человеку показывает свой, настоящий.
+do_cdn() {
+    need_root "cdn $1"
+    need_installed
+    DOMAIN="${1:-}"
+    [ -n "$DOMAIN" ] || die "Какой домен? sudo sh deploy/vless.sh cdn example.com"
+    case "$DOMAIN" in
+        *[!A-Za-z0-9.-]*) die "Домен $DOMAIN выглядит неправильно: только латиница, цифры, точки, дефис." ;;
+    esac
+
+    CRT=/usr/local/etc/xray/cdn.crt
+    KEY=/usr/local/etc/xray/cdn.key
+    if [ ! -f "$KEY" ]; then
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+            -keyout "$KEY" -out "$CRT" -days 3650 -subj "/CN=$DOMAIN" 2>/dev/null \
+            || die "Не удалось выпустить сертификат."
+    fi
+    harden_for_xray "$KEY"
+    harden_for_xray "$CRT"
+
+    WSPATH="/$(openssl rand -hex 6)"
+    OLD_PORT=$(py get port)
+    py cdn-setup --domain "$DOMAIN" --cert "$CRT" --key "$KEY" --path "$WSPATH" >/dev/null
+    restart_xray
+
+    NEW_PORT=$(py get port)
+    echo "=== маршрут через CDN поднят ==="
+    echo "Домен: $DOMAIN, вход на 443, путь $WSPATH"
+    if [ "$OLD_PORT" != "$NEW_PORT" ]; then
+        echo "REALITY переехал с $OLD_PORT на $NEW_PORT: 443 теперь у CDN."
+        echo "Прежние REALITY-ссылки устарели — новые ниже."
+    fi
+    echo
+    echo "Проверить, что Cloudflare настроен и достаёт до сервера:"
+    echo "    sudo sh deploy/vless.sh cdn-check"
+    echo
+    echo "Ссылки через CDN — их и раздавать людям в России:"
+    echo
+    py cdn-links
+    echo "Ссылки REALITY (напрямую, для тех, кого не режут):"
+    echo
+    py list
+}
+
+# Проверка снаружи внутрь: отвечает ли за домен Cloudflare, и достаёт
+# ли он до нашего Xray. Идёт с самого сервера через интернет, как
+# пошёл бы человек.
+do_cdn_check() {
+    need_root cdn-check
+    need_installed
+    DOMAIN=$(py get cdn.domain 2>/dev/null || true)
+    WSPATH=$(py get cdn.path 2>/dev/null || true)
+    [ -n "$DOMAIN" ] || die "Маршрут через CDN не настроен: sudo sh deploy/vless.sh cdn домен"
+    BAD=0
+
+    echo "=== $DOMAIN ==="
+    RESOLVED=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk '{print $1}' | sort -u | head -3 | tr '\n' ' ')
+    if [ -z "$RESOLVED" ]; then
+        echo "  ПЛОХО домен не резолвится — nameserver'ы ещё не переключились на Cloudflare"
+        BAD=$((BAD + 1))
+    elif echo "$RESOLVED" | grep -q "$(py get host)"; then
+        echo "  ПЛОХО домен указывает прямо на наш адрес ($RESOLVED) — облако в DNS серое, нужно оранжевое (Proxied)"
+        BAD=$((BAD + 1))
+    else
+        echo "  ok    домен резолвится в $RESOLVED (не в наш адрес — значит, через Cloudflare)"
+    fi
+
+    HEADERS=$(curl -sI -m 20 "https://$DOMAIN/" 2>/dev/null | tr -d '\r')
+    if printf '%s\n' "$HEADERS" | grep -qi '^server: *cloudflare'; then
+        echo "  ok    за домен отвечает Cloudflare"
+    else
+        echo "  ПЛОХО Cloudflare не отвечает за домен (нет заголовка server: cloudflare)"
+        BAD=$((BAD + 1))
+    fi
+
+    CODE=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "https://$DOMAIN$WSPATH" 2>/dev/null || echo 000)
+    case "$CODE" in
+        400|404|405|426)
+            echo "  ok    Cloudflare достучался до Xray (ответ $CODE на обычный запрос — так и должно быть)" ;;
+        52[0-9])
+            echo "  ПЛОХО Cloudflare не достучался до сервера (ошибка $CODE)."
+            echo "        Проверьте режим SSL/TLS = Full и что порт 443 у нас слушает Xray."
+            BAD=$((BAD + 1)) ;;
+        000)
+            echo "  ПЛОХО домен не отвечает вовсе"
+            BAD=$((BAD + 1)) ;;
+        *)
+            echo "  ?     ответ $CODE — неожиданно, но не обязательно плохо" ;;
+    esac
+
+    echo
+    if [ "$BAD" = "0" ]; then
+        echo "Маршрут через CDN исправен. Проверить со своего компьютера настоящим клиентом:"
+        echo "    sh deploy/test-link.sh '<ссылка через CDN>'"
+    else
+        echo "Проблем: $BAD. После починки в Cloudflare подождите пару минут и повторите."
+    fi
+}
+
+do_cdn_clear() {
+    need_root cdn-clear
+    need_installed
+    py cdn-clear
+    restart_xray
+    echo "Маршрут через CDN убран. REALITY остался на порту $(py get port)."
+}
+
 do_status() {
     need_root status
     need_installed
@@ -824,6 +949,10 @@ case "$COMMAND" in
     probe-clear) do_probe_clear ;;
     reach)     do_reach "${1:-}" ;;
     watch)     do_watch "${1:-}" ;;
+    cdn)       do_cdn "${1:-}" ;;
+    cdn-check) do_cdn_check ;;
+    cdn-clear) do_cdn_clear ;;
+    cdn-links) need_root cdn-links; need_installed; py cdn-links ;;
     uninstall) do_uninstall ;;
     *)         awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0" ;;
 esac

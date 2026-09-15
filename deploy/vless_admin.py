@@ -164,6 +164,46 @@ def _inbound(
     }
 
 
+def _cdn_inbound(meta: dict, clients: list) -> dict:
+    """Вход для маршрута через CDN.
+
+    Когда DPI режет любой TLS к нашему адресу, единственный способ до
+    него добраться — не ходить на него вовсе. Человек подключается к
+    адресу Cloudflare (для DPI это обычный сайт за CDN), а Cloudflare
+    сам ходит сюда. REALITY через CDN не проходит — он подменяет TLS,
+    а CDN его терминирует; поэтому здесь обычный TLS поверх XHTTP.
+    XHTTP выбран вместо WebSocket не по вкусу: Xray 26 объявил WebSocket
+    устаревшим и прямо рекомендует XHTTP, а тот и задуман для CDN —
+    режим packet-up отправляет данные обычными HTTP-запросами, которые
+    Cloudflare пропускает как есть. Vision с этим несовместим: flow у
+    клиентов снимаем.
+    """
+    cdn = meta["cdn"]
+    plain = [{k: v for k, v in c.items() if k != "flow"} for c in clients]
+    return {
+        "tag": "vless-cdn",
+        "listen": "0.0.0.0",
+        "port": int(cdn.get("port", 443)),
+        "protocol": "vless",
+        "settings": {"clients": plain, "decryption": "none"},
+        "streamSettings": {
+            "network": "xhttp",
+            "security": "tls",
+            "tlsSettings": {
+                "certificates": [
+                    {"certificateFile": cdn["cert"], "keyFile": cdn["key"]}
+                ],
+            },
+            "xhttpSettings": {"path": cdn["path"]},
+        },
+        "sniffing": {
+            "enabled": True,
+            "destOverride": ["http", "tls", "quic"],
+            "routeOnly": True,
+        },
+    }
+
+
 def render_config(meta: dict, loglevel: str = "warning") -> dict:
     for key in ("port", "sni", "dest", "private_key", "short_id"):
         if not meta.get(key):
@@ -183,6 +223,8 @@ def render_config(meta: dict, loglevel: str = "warning") -> dict:
                 alt.get("flow", FLOW),
             )
         )
+    if meta.get("cdn"):
+        inbounds.append(_cdn_inbound(meta, clients))
     return {
         # access: none — на диске не копится, кто куда ходил. Это и про
         # приватность, и про место: журнал посещений растёт быстро.
@@ -364,6 +406,27 @@ def client_config(
     }
 
 
+def cdn_link(meta: dict, client: dict) -> str:
+    """Ссылка на вход через CDN: адрес — домен, а не наш IP."""
+    cdn = meta["cdn"]
+    domain = cdn["domain"]
+    params = {
+        "type": "xhttp",
+        "security": "tls",
+        "encryption": "none",
+        "sni": domain,
+        "host": domain,
+        "path": cdn["path"],
+        # packet-up — режим для CDN: загрузка отдельными POST, скачивание
+        # одним потоком. stream-up через Cloudflare не проходит.
+        "mode": "packet-up",
+        "fp": meta.get("fingerprint") or FINGERPRINT,
+    }
+    query = urlencode(params, quote_via=quote, safe="")
+    label = quote(client["name"] + "-cdn")
+    return f"vless://{client['id']}@{domain}:{cdn.get('port', 443)}?{query}#{label}"
+
+
 # --- командная строка ------------------------------------------------
 
 
@@ -414,6 +477,17 @@ def main(argv: list[str] | None = None) -> int:
     selftest.add_argument("name")
     selftest.add_argument("--socks-port", type=int, default=10808)
     selftest.add_argument("--address", default=None)
+    cdn = commands.add_parser("cdn-setup", help="вход через CDN")
+    cdn.add_argument("--domain", required=True)
+    cdn.add_argument("--cert", required=True)
+    cdn.add_argument("--key", required=True)
+    cdn.add_argument("--path", required=True)
+    cdn.add_argument("--port", type=int, default=443)
+    cdn.add_argument("--reality-port", type=int, default=8443,
+                     help="куда уходит REALITY, если его порт занимает CDN")
+    cdnlinks = commands.add_parser("cdn-links", help="ссылки через CDN")
+    cdnlinks.add_argument("name", nargs="?")
+    commands.add_parser("cdn-clear", help="убрать вход через CDN")
     field = commands.add_parser("get", help="одно поле шпаргалки")
     field.add_argument("field")
 
@@ -453,7 +527,10 @@ def main(argv: list[str] | None = None) -> int:
             if not clients:
                 print("Клиентов нет. Завести: vless.sh add имя")
             for client in clients:
-                print(f"{client['name']}\n{link(meta, client)}\n")
+                print(f"{client['name']}\n{link(meta, client)}")
+                if meta.get("cdn"):
+                    print(f"через CDN:\n{cdn_link(meta, client)}")
+                print()
         elif args.command == "render":
             write_config(meta, args.config, loglevel=args.loglevel)
             print(f"Конфиг пересобран: {args.config} (журнал: {args.loglevel})")
@@ -512,14 +589,46 @@ def main(argv: list[str] | None = None) -> int:
                 meta, find_client(meta, args.name), args.socks_port, args.address
             )
             print(json.dumps(config, ensure_ascii=False, indent=2))
+        elif args.command == "cdn-setup":
+            if not args.path.startswith("/"):
+                raise VlessError("Путь должен начинаться с /")
+            meta["cdn"] = {
+                "domain": args.domain,
+                "cert": args.cert,
+                "key": args.key,
+                "path": args.path,
+                "port": args.port,
+            }
+            # Два входа на одном порту не бывает: REALITY уступает.
+            if int(meta["port"]) == args.port:
+                meta["port"] = args.reality_port
+            _apply(meta, args.config, args.meta)
+            for client in meta.get("clients", []):
+                print(cdn_link(meta, client))
+        elif args.command == "cdn-links":
+            if not meta.get("cdn"):
+                raise VlessError("Вход через CDN не настроен: sudo sh deploy/vless.sh cdn домен")
+            targets = [find_client(meta, args.name)] if args.name else meta.get("clients", [])
+            for client in targets:
+                print(f"{client['name']}\n{cdn_link(meta, client)}\n")
+        elif args.command == "cdn-clear":
+            meta.pop("cdn", None)
+            _apply(meta, args.config, args.meta)
+            print("Вход через CDN убран.")
         elif args.command == "get":
-            value = meta.get(args.field)
-            if value is None:
-                raise VlessError(f"В шпаргалке нет поля {args.field!r}.")
+            # Вложенные поля через точку: get cdn.domain. Иначе shell
+            # разбирал бы питоновский repr словаря через sed.
+            value = meta
+            for part in args.field.split("."):
+                value = value.get(part) if isinstance(value, dict) else None
+                if value is None:
+                    raise VlessError(f"В шпаргалке нет поля {args.field!r}.")
             print(value)
         elif args.command == "show":
             print(f"адрес:  {meta['host']}:{meta['port']}")
             print(f"маска:  {meta['sni']}")
+            if meta.get("cdn"):
+                print(f"CDN:    {meta['cdn']['domain']}:{meta['cdn'].get('port', 443)}")
             print(f"клиентов: {len(meta.get('clients', []))}")
     except VlessError as error:
         print(str(error), file=sys.stderr)

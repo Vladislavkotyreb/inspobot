@@ -51,6 +51,9 @@ sudo sh deploy/vless.sh diagnose        # перебрать варианты
 sudo sh deploy/vless.sh set-domain X    # сменить маскировочный домен
 sudo sh deploy/vless.sh probe-links     # ссылки на несколько доменов сразу
 sudo sh deploy/vless.sh probe-clear     # убрать пробные входы
+sudo sh deploy/vless.sh cdn ДОМЕН       # маршрут через Cloudflare
+sudo sh deploy/vless.sh cdn-check       # Cloudflare достаёт до сервера?
+sudo sh deploy/vless.sh cdn-clear       # убрать маршрут через CDN
 ```
 
 У каждого человека **свой** клиент. Не потому что жалко, а потому что
@@ -209,6 +212,49 @@ sudo sh deploy/vless.sh probe-links
 Рабочие на сегодня: `dl.google.com`, `www.bing.com`, `www.samsung.com`,
 `www.apple.com`, `addons.mozilla.org`. Свой: `VLESS_SNI=example.com` перед
 установкой или `set-domain` потом.
+
+## Когда режут сам адрес: маршрут через CDN
+
+Бывает, что DPI оператора режет **любой** TLS к адресу сервера: TCP
+проходит, а первый же пакет с ClientHello выбрасывается — на любом
+порту, с любым доменом, с любым отпечатком, даже из голого Safari. В
+журнале сервера это выглядит как `failed to read client hello` на
+каждой попытке. На этом адресе REALITY для такого оператора мёртв, и
+крутить настройки бессмысленно: до сервера просто нельзя ходить.
+
+Выход — не ходить на него. Человек подключается к адресу Cloudflare
+(для DPI это обычный сайт за CDN), а Cloudflare сам ходит на наш
+сервер. Нужен домен (~$10 в год) и бесплатный Cloudflare.
+
+**В Cloudflare:** добавить домен, переключить у регистратора
+nameserver'ы на выданные, дождаться Active. Потом:
+
+- DNS → запись `A`, имя `@`, адрес сервера, Proxy status — **Proxied**
+  (оранжевое облако; серое — значит люди пойдут прямо на наш IP, и всё
+  зря);
+- SSL/TLS → режим **Full** (не Flexible: тогда между Cloudflare и
+  сервером трафик пойдёт открытым; и не Full strict: наш сертификат
+  самоподписанный).
+
+**На сервере:**
+
+```bash
+sudo sh deploy/vless.sh cdn vpn.example.com   # поднять вход
+sudo sh deploy/vless.sh cdn-check             # Cloudflare достаёт до нас?
+```
+
+Вход — VLESS поверх XHTTP + TLS на 443; REALITY при этом переезжает на
+8443 и продолжает работать для тех, кого не режут. XHTTP, а не
+WebSocket: Xray 26 объявил WebSocket устаревшим, а XHTTP как раз
+задуман для CDN — режим `packet-up` шлёт данные обычными
+HTTP-запросами, которые Cloudflare пропускает как есть.
+
+Ссылки через CDN печатает `cdn-links`; людям в России раздавать их.
+Проверить со своего компьютера: `sh deploy/test-link.sh '<ссылка>'` —
+он понимает и такие ссылки.
+
+Ограничение честное: Cloudflare в России под замедлением, скорость
+через него будет ниже, чем напрямую. Зато доходит.
 
 ## Что внутри
 

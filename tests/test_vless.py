@@ -714,7 +714,9 @@ class LinkRoundTrip(unittest.TestCase):
         full = vless.link(data, data["clients"][0])
         for broken, hint in (
             (full.split("&pbk=")[0], "pbk"),
-            (full.replace("security=reality", "security=tls"), "REALITY"),
+            # TLS теперь законный вариант (маршрут через CDN), поэтому
+            # «не REALITY» проверяем на ссылке вовсе без защиты.
+            (full.replace("security=reality", "security=none"), "REALITY"),
             ("https://example.com", "vless://"),
             ("vless://@1.2.3.4:443?security=reality&pbk=x", "идентификатор"),
         ):
@@ -833,6 +835,156 @@ class Fingerprint(unittest.TestCase):
                 run_cli(*common, "set-fingerprint", "netscape")
             self.assertEqual(run_cli(*common, "set-fingerprint", "firefox"), 0)
             self.assertEqual(vless.load_meta(meta_path)["fingerprint"], "firefox")
+
+
+class Cdn(unittest.TestCase):
+    """Маршрут через CDN.
+
+    Когда DPI режет любой TLS к нашему адресу, человек должен ходить не
+    на него, а на адрес Cloudflare. Здесь всё, что можно проверить без
+    Cloudflare: вход собирается, порты не сталкиваются, ссылка ведёт на
+    домен, а не на IP, и клиент из этой ссылки собирается тем же, что
+    сервер ждёт.
+    """
+
+    def with_cdn(self, **over):
+        cdn = {"domain": "vpn.example.com", "cert": "/c.crt", "key": "/c.key",
+               "path": "/abc123", "port": 443}
+        cdn.update(over)
+        return meta(port=8443, cdn=cdn)
+
+    def test_вход_собирается(self):
+        config = vless.render_config(self.with_cdn())
+        json.dumps(config)
+        tags = [i["tag"] for i in config["inbounds"]]
+        self.assertIn("vless-cdn", tags)
+        cdn = next(i for i in config["inbounds"] if i["tag"] == "vless-cdn")
+        self.assertEqual(cdn["port"], 443)
+        self.assertEqual(cdn["streamSettings"]["network"], "xhttp")
+        self.assertEqual(cdn["streamSettings"]["security"], "tls")
+        self.assertEqual(cdn["streamSettings"]["xhttpSettings"]["path"], "/abc123")
+        certs = cdn["streamSettings"]["tlsSettings"]["certificates"][0]
+        self.assertEqual(certs["certificateFile"], "/c.crt")
+        self.assertEqual(certs["keyFile"], "/c.key")
+
+    def test_vision_снят_только_на_cdn_входе(self):
+        # WebSocket с Vision несовместим; REALITY-вход его сохраняет.
+        config = vless.render_config(self.with_cdn())
+        by_tag = {i["tag"]: i for i in config["inbounds"]}
+        self.assertNotIn("flow", by_tag["vless-cdn"]["settings"]["clients"][0])
+        self.assertEqual(by_tag["vless-reality"]["settings"]["clients"][0]["flow"], vless.FLOW)
+
+    def test_клиенты_общие(self):
+        config = vless.render_config(self.with_cdn())
+        by_tag = {i["tag"]: i for i in config["inbounds"]}
+        self.assertEqual(
+            [c["id"] for c in by_tag["vless-cdn"]["settings"]["clients"]],
+            [c["id"] for c in by_tag["vless-reality"]["settings"]["clients"]],
+        )
+
+    def test_порты_не_сталкиваются(self):
+        ports = [i["port"] for i in vless.render_config(self.with_cdn())["inbounds"]]
+        self.assertEqual(len(ports), len(set(ports)), ports)
+
+    def test_ссылка_ведёт_на_домен_а_не_на_ip(self):
+        data = self.with_cdn()
+        url = vless.cdn_link(data, data["clients"][0])
+        parsed = urlparse(url)
+        self.assertEqual(parsed.hostname, "vpn.example.com")
+        self.assertNotIn(data["host"], url)
+        query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        self.assertEqual(query["type"], "xhttp")
+        self.assertEqual(query["security"], "tls")
+        self.assertEqual(query["path"], "/abc123")
+        # Через Cloudflare проходит только packet-up.
+        self.assertEqual(query["mode"], "packet-up")
+        self.assertEqual(query["sni"], "vpn.example.com")
+        self.assertEqual(query["host"], "vpn.example.com")
+        self.assertNotIn("flow", query)
+        self.assertNotIn("pbk", query)
+        self.assertTrue(url.endswith("#vlad-iphone-cdn"), url)
+
+    def test_ссылка_разбирается_и_даёт_тот_же_клиент(self):
+        data = self.with_cdn()
+        url = vless.cdn_link(data, data["clients"][0])
+        parsed = linkmod.parse(url)
+        self.assertEqual(parsed["security"], "tls")
+        self.assertEqual(parsed["transport"], "xhttp")
+        self.assertEqual(parsed["path"], "/abc123")
+        config = linkmod.client_config(url)
+        out = config["outbounds"][0]
+        self.assertEqual(out["settings"]["vnext"][0]["address"], "vpn.example.com")
+        self.assertEqual(out["settings"]["vnext"][0]["port"], 443)
+        self.assertNotIn("flow", out["settings"]["vnext"][0]["users"][0])
+        self.assertEqual(out["streamSettings"]["network"], "xhttp")
+        self.assertEqual(out["streamSettings"]["security"], "tls")
+        self.assertEqual(out["streamSettings"]["xhttpSettings"]["path"], "/abc123")
+        self.assertEqual(out["streamSettings"]["xhttpSettings"]["host"], "vpn.example.com")
+        self.assertEqual(out["streamSettings"]["xhttpSettings"]["mode"], "packet-up")
+        self.assertEqual(out["streamSettings"]["tlsSettings"]["serverName"], "vpn.example.com")
+
+    def test_tls_ссылка_без_пути_отвергается(self):
+        with self.assertRaises(linkmod.LinkError):
+            linkmod.parse("vless://x@vpn.example.com:443?type=xhttp&security=tls")
+
+    def test_старая_ws_ссылка_тоже_разбирается(self):
+        # Чужие ссылки бывают и на WebSocket — не отвергать.
+        config = linkmod.client_config(
+            "vless://x@vpn.example.com:443?type=ws&security=tls&path=%2Fp&host=vpn.example.com"
+        )
+        self.assertEqual(config["outbounds"][0]["streamSettings"]["network"], "ws")
+
+    def test_reality_ссылки_разбираются_как_раньше(self):
+        data = meta()
+        parsed = linkmod.parse(vless.link(data, data["clients"][0]))
+        self.assertEqual(parsed["security"], "reality")
+        self.assertEqual(parsed["transport"], "tcp")
+
+    def test_cli_setup_уводит_reality_с_занятого_порта(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "h", "--port", "443", "--sni", "s",
+                    "--dest", "s:443", "--private-key", "P", "--public-key", "U",
+                    "--short-id", "a", "--client", "one")
+            self.assertEqual(run_cli(*common, "cdn-setup", "--domain", "d.com",
+                                     "--cert", "/c", "--key", "/k", "--path", "/p"), 0)
+            saved = vless.load_meta(meta_path)
+            self.assertEqual(saved["port"], 8443)
+            self.assertEqual(saved["cdn"]["domain"], "d.com")
+            written = json.loads(pathlib.Path(config).read_text(encoding="utf-8"))
+            self.assertEqual(sorted(i["port"] for i in written["inbounds"]), [443, 8443])
+            # Убрали — REALITY остаётся там, куда его увели: ссылки уже розданы.
+            self.assertEqual(run_cli(*common, "cdn-clear"), 0)
+            saved = vless.load_meta(meta_path)
+            self.assertNotIn("cdn", saved)
+            self.assertEqual(saved["port"], 8443)
+
+    def test_cli_setup_не_трогает_порт_если_свободен(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "h", "--port", "8443", "--sni", "s",
+                    "--dest", "s:443", "--private-key", "P", "--public-key", "U",
+                    "--short-id", "a", "--client", "one")
+            run_cli(*common, "cdn-setup", "--domain", "d.com",
+                    "--cert", "/c", "--key", "/k", "--path", "/p")
+            self.assertEqual(vless.load_meta(meta_path)["port"], 8443)
+
+    def test_get_вложенное_поле(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "h", "--port", "443", "--sni", "s",
+                    "--dest", "s:443", "--private-key", "P", "--public-key", "U",
+                    "--short-id", "a", "--client", "one")
+            run_cli(*common, "cdn-setup", "--domain", "d.com",
+                    "--cert", "/c", "--key", "/k", "--path", "/p")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(vless.main(common + ["get", "cdn.domain"]), 0)
+            self.assertEqual(out.getvalue().strip(), "d.com")
+            self.assertEqual(run_cli(*common, "get", "cdn.нет"), 1)
 
 
 if __name__ == "__main__":

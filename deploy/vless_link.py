@@ -32,37 +32,74 @@ def parse(link: str) -> dict:
     if not parsed.hostname:
         raise LinkError("В ссылке нет адреса сервера.")
     query = {key: value[0] for key, value in parse_qs(parsed.query).items()}
-    if query.get("security") != "reality":
-        raise LinkError(f"Это не REALITY, а {query.get('security') or 'без защиты'}.")
-    if not query.get("pbk"):
-        raise LinkError("В ссылке нет публичного ключа (pbk) — она обрезана.")
+    security = query.get("security", "")
+    transport = query.get("type", "tcp")
+    if security == "reality":
+        if not query.get("pbk"):
+            raise LinkError("В ссылке нет публичного ключа (pbk) — она обрезана.")
+    elif security == "tls":
+        # Маршрут через CDN: обычный TLS поверх XHTTP (или старого WebSocket).
+        if transport not in ("xhttp", "ws"):
+            raise LinkError(f"TLS-ссылка ожидается с type=xhttp или ws, а тут {transport!r}.")
+        if not query.get("path"):
+            raise LinkError("В ссылке нет пути (path) — она обрезана.")
+    else:
+        raise LinkError(f"Это не REALITY и не TLS, а {security or 'без защиты'}.")
     return {
         "id": parsed.username,
         "host": parsed.hostname,
         "port": parsed.port or 443,
         "name": unquote(parsed.fragment) or "клиент",
+        "security": security,
+        "transport": transport,
         "flow": query.get("flow", ""),
-        "sni": query.get("sni", ""),
-        "pbk": query["pbk"],
+        "sni": query.get("sni", "") or (parsed.hostname if security == "tls" else ""),
+        "pbk": query.get("pbk", ""),
         "sid": query.get("sid", ""),
         "fp": query.get("fp", "chrome"),
         "spx": query.get("spx", ""),
+        "path": query.get("path", ""),
+        "ws_host": query.get("host", "") or parsed.hostname,
+        "mode": query.get("mode", ""),
     }
 
 
 def client_config(link: str, socks_port: int = 10808) -> dict:
     data = parse(link)
     user = {"id": data["id"], "encryption": "none"}
-    if data["flow"]:
+    if data["flow"] and data["security"] == "reality":
         user["flow"] = data["flow"]
-    reality = {
-        "serverName": data["sni"],
-        "fingerprint": data["fp"],
-        "publicKey": data["pbk"],
-        "shortId": data["sid"],
-    }
-    if data["spx"]:
-        reality["spiderX"] = data["spx"]
+    if data["security"] == "reality":
+        reality = {
+            "serverName": data["sni"],
+            "fingerprint": data["fp"],
+            "publicKey": data["pbk"],
+            "shortId": data["sid"],
+        }
+        if data["spx"]:
+            reality["spiderX"] = data["spx"]
+        stream = {
+            "network": "tcp",
+            "security": "reality",
+            "realitySettings": reality,
+        }
+    elif data["transport"] == "xhttp":
+        xhttp = {"path": data["path"], "host": data["ws_host"]}
+        if data["mode"]:
+            xhttp["mode"] = data["mode"]
+        stream = {
+            "network": "xhttp",
+            "security": "tls",
+            "tlsSettings": {"serverName": data["sni"], "fingerprint": data["fp"]},
+            "xhttpSettings": xhttp,
+        }
+    else:
+        stream = {
+            "network": "ws",
+            "security": "tls",
+            "tlsSettings": {"serverName": data["sni"], "fingerprint": data["fp"]},
+            "wsSettings": {"path": data["path"], "host": data["ws_host"]},
+        }
     return {
         "log": {"loglevel": "warning"},
         "inbounds": [
@@ -88,11 +125,7 @@ def client_config(link: str, socks_port: int = 10808) -> dict:
                         }
                     ]
                 },
-                "streamSettings": {
-                    "network": "tcp",
-                    "security": "reality",
-                    "realitySettings": reality,
-                },
+                "streamSettings": stream,
             }
         ],
     }
