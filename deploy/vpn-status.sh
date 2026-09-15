@@ -72,11 +72,35 @@ if [ -f /etc/amnezia/amneziawg/awg0.conf ]; then
     echo "  клиентов: $PEERS"
     HANDSHAKE=$(awg show awg0 latest-handshakes 2>/dev/null | awk '$2 > 0' | wc -l)
     echo "  было рукопожатий: $HANDSHAKE"
-elif [ -d /opt/amnezia ]; then
-    echo "  поставлен приложением Amnezia (в /opt/amnezia)"
-    ls /opt/amnezia 2>/dev/null | sed 's/^/    /'
 else
-    echo "  не установлен"
+    echo "  наш не установлен"
+fi
+
+say "установка приложением Amnezia"
+if ! command -v docker >/dev/null 2>&1 || [ -z "$(docker ps -q 2>/dev/null)" ]; then
+    echo "  контейнеров нет"
+else
+    # Приложение ставит своё хозяйство в контейнеры, и счётчики
+    # рукопожатий живут там. Наш счётчик снаружи к ним отношения не
+    # имеет: это разные туннели на разных портах.
+    for NAME in $(docker ps --format '{{.Names}}' 2>/dev/null | grep '^amnezia'); do
+        echo "  --- $NAME ---"
+        docker port "$NAME" 2>/dev/null | sed 's/^/      /' || true
+        for TOOL in awg wg; do
+            OUT=$(docker exec "$NAME" "$TOOL" show 2>/dev/null)
+            [ -z "$OUT" ] && continue
+            printf '%s\n' "$OUT" | sed -n '1,4p' | sed 's/^/      /'
+            PEERS=$(printf '%s\n' "$OUT" | grep -c '^peer:')
+            echo "      клиентов: $PEERS"
+            SHAKES=$(docker exec "$NAME" "$TOOL" show all latest-handshakes 2>/dev/null | awk '$NF > 0' | wc -l)
+            echo "      было рукопожатий: $SHAKES"
+            break
+        done
+    done
+    echo
+    echo "  «было рукопожатий» больше нуля означает, что пакеты от клиента"
+    echo "  доходили: UDP у его оператора проходит. Ноль после попыток —"
+    echo "  не доходили вовсе."
 fi
 
 say "пересылка и NAT"
@@ -100,6 +124,17 @@ else
     echo "  Проверка стучится только по TCP: UDP так не проверить."
     echo "  Для AmneziaWG признак связи — строка «было рукопожатий» выше:"
     echo "  если там 0 после попыток подключения, пакеты не дошли."
+fi
+
+say "пересечения"
+BUSY=$(ss -lnt 2>/dev/null | grep -c ':443 ')
+if [ -n "$(docker ps -q 2>/dev/null)" ] && [ -f /usr/local/etc/xray/config.json ]; then
+    echo "  На машине и наша установка, и установка приложением Amnezia."
+    echo "  Они делят порты и память: 443 занял контейнер, наш Xray ушёл"
+    echo "  на запасные порты. Держать обе разом не нужно — лишние"
+    echo "  открытые порты и лишний расход памяти."
+else
+    echo "  установка одна, пересечений нет"
 fi
 
 say "вывод"
