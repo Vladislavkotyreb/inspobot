@@ -134,10 +134,25 @@ def service_gid(unit_path: str = UNIT) -> int | None:
 
 
 def _inbound(
-    meta: dict, tag: str, port: int, sni: str, clients: list, flow: str = FLOW
+    meta: dict,
+    tag: str,
+    port: int,
+    sni: str,
+    clients: list,
+    flow: str = FLOW,
+    network: str = "tcp",
+    path: str = "",
 ) -> dict:
     """Один вход REALITY. Ключи и клиенты общие у всех входов: меняется
-    только порт, домен, за которым вход прячется, и наличие Vision."""
+    только порт, домен, за которым вход прячется, транспорт и Vision.
+
+    Транспорт xhttp заворачивает поток в обычные HTTP-запросы. Рисунок
+    трафика получается как у браузера, а не как у длинного туннеля —
+    связку VLESS+Vision поверх голого TCP фильтры узнают именно по
+    рисунку. Vision с xhttp несовместим: flow снимается принудительно.
+    """
+    if network == "xhttp":
+        flow = ""
     if flow != FLOW:
         clients = [{**client, "flow": flow} if flow else
                    {key: value for key, value in client.items() if key != "flow"}
@@ -149,7 +164,7 @@ def _inbound(
         "protocol": "vless",
         "settings": {"clients": clients, "decryption": "none"},
         "streamSettings": {
-            "network": "tcp",
+            "network": network,
             "security": "reality",
             "realitySettings": {
                 "show": False,
@@ -159,6 +174,7 @@ def _inbound(
                 "privateKey": meta["private_key"],
                 "shortIds": [meta["short_id"]],
             },
+            **({"xhttpSettings": {"path": path}} if network == "xhttp" else {}),
         },
         # routeOnly: распознанный домен идёт только в правила
         # маршрутизации, адрес соединения остаётся исходным.
@@ -251,7 +267,12 @@ def render_config(meta: dict, loglevel: str = "warning") -> dict:
     # Основной вход плюс пробные: они нужны, чтобы человек на той
     # стороне перебрал домены сам, импортировав несколько ссылок, а не
     # ждал круга переписки на каждый.
-    inbounds = [_inbound(meta, "vless-reality", meta["port"], meta["sni"], clients)]
+    inbounds = [
+        _inbound(
+            meta, "vless-reality", meta["port"], meta["sni"], clients,
+            network=meta.get("network", "tcp"), path=meta.get("path", ""),
+        )
+    ]
     for index, alt in enumerate(meta.get("alts", []), start=1):
         inbounds.append(
             _inbound(
@@ -361,12 +382,16 @@ def link(meta: dict, client: dict, alt: dict | None = None, label_suffix: str = 
     port = alt["port"] if alt else meta["port"]
     sni = alt["sni"] if alt else meta["sni"]
     flow = alt.get("flow", FLOW) if alt else FLOW
+    network = "tcp" if alt else meta.get("network", "tcp")
+    path = "" if alt else meta.get("path", "")
+    if network == "xhttp":
+        flow = ""
     label = client["name"]
     if alt:
         label = f"{client['name']}-{sni}" + ("" if flow else "-novision")
     label = label + label_suffix
     params = {
-        "type": "tcp",
+        "type": network,
         "security": "reality",
         "encryption": "none",
         "flow": flow,
@@ -376,6 +401,8 @@ def link(meta: dict, client: dict, alt: dict | None = None, label_suffix: str = 
         "sid": meta["short_id"],
         "spx": "/",
     }
+    if network == "xhttp":
+        params["path"] = path
     params = {key: value for key, value in params.items() if value != ""}
     query = urlencode(params, quote_via=quote, safe="")
     return f"vless://{client['id']}@{host}:{port}?{query}#{quote(label)}"
@@ -521,6 +548,9 @@ def main(argv: list[str] | None = None) -> int:
     fpset.add_argument("name")
     domain = commands.add_parser("set-domain", help="сменить маскировочный домен")
     domain.add_argument("domain")
+    transport = commands.add_parser("set-transport", help="транспорт основного входа")
+    transport.add_argument("network", choices=["tcp", "xhttp"])
+    transport.add_argument("--path", default="")
     fingerprint = commands.add_parser("set-fingerprint", help="сменить отпечаток ClientHello")
     fingerprint.add_argument("fingerprint", choices=FINGERPRINTS)
     alts = commands.add_parser("set-alts", help="пробные входы: домен:порт …")
@@ -623,6 +653,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{alt['sni']} (порт {alt['port']}{note})")
                 print(link(meta, client, alt))
                 print()
+        elif args.command == "set-transport":
+            meta["network"] = args.network
+            if args.network == "xhttp":
+                meta["path"] = args.path or meta.get("path") or "/"
+            _apply(meta, args.config, args.meta)
+            print(args.network)
         elif args.command == "set-fingerprint":
             meta["fingerprint"] = args.fingerprint
             # Конфиг сервера от отпечатка не зависит — меняются только
@@ -712,6 +748,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "show":
             print(f"адрес:  {meta['host']}:{meta['port']}")
             print(f"маска:  {meta['sni']}")
+            print(f"транспорт: {meta.get('network', 'tcp')}{meta.get('path', '')}")
             if meta.get("cdn"):
                 print(f"CDN:    {meta['cdn']['domain']}:{meta['cdn'].get('port', 443)}")
             if meta.get("ss"):

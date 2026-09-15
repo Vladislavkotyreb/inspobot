@@ -51,6 +51,7 @@ sudo sh deploy/vless.sh diagnose        # перебрать варианты
 sudo sh deploy/vless.sh set-domain X    # сменить маскировочный домен
 sudo sh deploy/vless.sh probe-links     # ссылки на несколько доменов сразу
 sudo sh deploy/vless.sh probe-clear     # убрать пробные входы
+sudo sh deploy/vless.sh transport xhttp # сменить транспорт основного входа
 sudo sh deploy/vless.sh ss              # вход Shadowsocks (без рукопожатия TLS)
 sudo sh deploy/vless.sh ss-clear        # убрать его
 sudo sh deploy/vless.sh cdn ДОМЕН       # маршрут через Cloudflare
@@ -214,6 +215,30 @@ sudo sh deploy/vless.sh probe-links
 Рабочие на сегодня: `dl.google.com`, `www.bing.com`, `www.samsung.com`,
 `www.apple.com`, `addons.mozilla.org`. Свой: `VLESS_SNI=example.com` перед
 установкой или `set-domain` потом.
+
+## Транспорт: xhttp вместо голого TCP
+
+Голый TCP с Vision (`xtls-rprx-vision`) — самая узнаваемая связка:
+фильтры научились определять её по рисунку трафика, не читая
+содержимого. Показательно, как устроены рабочие узлы известных
+сервисов: VLESS · **xhttp** · Reality, VLESS · xhttp · TLS,
+VLESS · WebSocket · TLS. Голого TCP среди них нет.
+
+xhttp заворачивает поток в обычные HTTP-запросы поверх того же REALITY:
+маскировка, ключи и домен остаются, меняется только форма трафика — она
+становится браузерной. Домен для этого не нужен.
+
+```bash
+sudo sh deploy/vless.sh transport xhttp   # переключить
+sudo sh deploy/vless.sh transport tcp     # вернуть
+```
+
+Vision при этом снимается принудительно: с xhttp он несовместим. Ссылки
+меняются, команда печатает новые.
+
+Пробные входы (`probe-links`) остаются на TCP намеренно: они нужны для
+перебора доменов, и если бы вместе с доменом менялся транспорт, перебор
+проверял бы две переменные разом.
 
 ## Когда убивают рукопожатие TLS: Shadowsocks
 

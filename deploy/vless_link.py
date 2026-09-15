@@ -74,6 +74,8 @@ def parse(link: str) -> dict:
     if security == "reality":
         if not query.get("pbk"):
             raise LinkError("В ссылке нет публичного ключа (pbk) — она обрезана.")
+        if transport not in ("tcp", "xhttp"):
+            raise LinkError(f"REALITY ожидается с type=tcp или xhttp, а тут {transport!r}.")
     elif security == "tls":
         # Маршрут через CDN: обычный TLS поверх XHTTP (или старого WebSocket).
         if transport not in ("xhttp", "ws"):
@@ -149,10 +151,12 @@ def client_config(link: str, socks_port: int = 10808) -> dict:
         if data["spx"]:
             reality["spiderX"] = data["spx"]
         stream = {
-            "network": "tcp",
+            "network": data["transport"],
             "security": "reality",
             "realitySettings": reality,
         }
+        if data["transport"] == "xhttp":
+            stream["xhttpSettings"] = {"path": data["path"] or "/"}
     elif data["transport"] == "xhttp":
         xhttp = {"path": data["path"], "host": data["ws_host"]}
         if data["mode"]:

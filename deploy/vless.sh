@@ -17,6 +17,7 @@
 #   sudo sh deploy/vless.sh probe-clear    убрать пробные входы
 #   sudo sh deploy/vless.sh reach          доходят ли до сервера из России
 #   sudo sh deploy/vless.sh watch          смотреть, что приходит на сервер
+#   sudo sh deploy/vless.sh transport xhttp|tcp  транспорт основного входа
 #   sudo sh deploy/vless.sh ss [ПОРТ]      вход Shadowsocks (без рукопожатия TLS)
 #   sudo sh deploy/vless.sh ss-clear       убрать вход Shadowsocks
 #   sudo sh deploy/vless.sh cdn ДОМЕН      маршрут через Cloudflare
@@ -947,6 +948,38 @@ do_ss_clear() {
     echo "Вход Shadowsocks убран."
 }
 
+# Транспорт основного входа. Голый TCP с Vision фильтры узнают по
+# рисунку трафика; xhttp заворачивает поток в обычные HTTP-запросы, и
+# рисунок получается браузерный. Vision с xhttp несовместим и снимается.
+do_transport() {
+    need_root "transport $1"
+    need_installed
+    NETWORK="${1:-}"
+    case "$NETWORK" in
+        tcp|xhttp) ;;
+        *) die "Транспорт: tcp или xhttp. Например: sudo sh deploy/vless.sh transport xhttp" ;;
+    esac
+
+    if [ "$NETWORK" = "xhttp" ]; then
+        WSPATH="$(py get path 2>/dev/null || true)"
+        case "$WSPATH" in
+            /?*) ;;
+            *) WSPATH="/$(openssl rand -hex 6)" ;;
+        esac
+        py set-transport xhttp --path "$WSPATH" >/dev/null
+    else
+        py set-transport tcp >/dev/null
+    fi
+    restart_xray
+
+    echo "Транспорт основного входа: $NETWORK"
+    [ "$NETWORK" = "xhttp" ] && echo "Vision снят — с xhttp он несовместим."
+    echo
+    echo "Ссылки изменились, раздайте новые:"
+    echo
+    py list
+}
+
 do_status() {
     need_root status
     need_installed
@@ -992,6 +1025,7 @@ case "$COMMAND" in
     probe-clear) do_probe_clear ;;
     reach)     do_reach "${1:-}" ;;
     watch)     do_watch "${1:-}" ;;
+    transport) do_transport "${1:-}" ;;
     ss)        do_ss "${1:-}" ;;
     ss-clear)  do_ss_clear ;;
     ss-link)   need_root ss-link; need_installed; py ss-link ;;

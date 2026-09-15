@@ -1086,5 +1086,88 @@ class Shadowsocks(unittest.TestCase):
                                      "--password", "cGFzcw=="), 1)
 
 
+class XhttpTransport(unittest.TestCase):
+    """REALITY поверх xhttp.
+
+    Так устроены рабочие узлы известных сервисов: VLESS · xhttp ·
+    Reality. Голый TCP с Vision фильтры узнают по рисунку трафика,
+    xhttp даёт браузерный рисунок.
+    """
+
+    def xhttp(self, **over):
+        return meta(network="xhttp", path="/abc123", **over)
+
+    def test_вход_на_xhttp(self):
+        config = vless.render_config(self.xhttp())
+        inbound = config["inbounds"][0]
+        stream = inbound["streamSettings"]
+        self.assertEqual(stream["network"], "xhttp")
+        self.assertEqual(stream["security"], "reality")
+        self.assertEqual(stream["xhttpSettings"]["path"], "/abc123")
+        # Ключи и маскировка те же, что на tcp.
+        self.assertEqual(stream["realitySettings"]["serverNames"], [meta()["sni"]])
+
+    def test_vision_снимается(self):
+        # Vision работает только поверх голого TCP.
+        inbound = vless.render_config(self.xhttp())["inbounds"][0]
+        self.assertNotIn("flow", inbound["settings"]["clients"][0])
+
+    def test_tcp_по_умолчанию_с_vision(self):
+        inbound = vless.render_config(meta())["inbounds"][0]
+        self.assertEqual(inbound["streamSettings"]["network"], "tcp")
+        self.assertNotIn("xhttpSettings", inbound["streamSettings"])
+        self.assertEqual(inbound["settings"]["clients"][0]["flow"], vless.FLOW)
+
+    def test_ссылка_несёт_транспорт_и_путь(self):
+        data = self.xhttp()
+        url = vless.link(data, data["clients"][0])
+        query = {k: v[0] for k, v in parse_qs(urlparse(url).query).items()}
+        self.assertEqual(query["type"], "xhttp")
+        self.assertEqual(query["path"], "/abc123")
+        self.assertEqual(query["security"], "reality")
+        self.assertEqual(query["pbk"], data["public_key"])
+        self.assertNotIn("flow", query)
+
+    def test_клиент_из_ссылки_совпадает_с_сервером(self):
+        data = self.xhttp()
+        url = vless.link(data, data["clients"][0])
+        config = linkmod.client_config(url)
+        stream = config["outbounds"][0]["streamSettings"]
+        self.assertEqual(stream["network"], "xhttp")
+        self.assertEqual(stream["security"], "reality")
+        self.assertEqual(stream["xhttpSettings"]["path"], "/abc123")
+        user = config["outbounds"][0]["settings"]["vnext"][0]["users"][0]
+        self.assertNotIn("flow", user)
+
+    def test_пробные_входы_остаются_на_tcp(self):
+        # Они нужны для перебора доменов, а не транспортов: иначе
+        # перебор менял бы две переменные разом.
+        data = self.xhttp(alts=[{"sni": "www.bing.com", "port": 8443}])
+        config = vless.render_config(data)
+        self.assertEqual(config["inbounds"][0]["streamSettings"]["network"], "xhttp")
+        self.assertEqual(config["inbounds"][1]["streamSettings"]["network"], "tcp")
+
+    def test_cli_переключает_туда_и_обратно(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "h", "--port", "443", "--sni", "s",
+                    "--dest", "s:443", "--private-key", "P", "--public-key", "U",
+                    "--short-id", "a", "--client", "one")
+            self.assertEqual(run_cli(*common, "set-transport", "xhttp", "--path", "/p"), 0)
+            saved = vless.load_meta(meta_path)
+            self.assertEqual(saved["network"], "xhttp")
+            self.assertEqual(saved["path"], "/p")
+            written = json.loads(pathlib.Path(config).read_text(encoding="utf-8"))
+            self.assertEqual(written["inbounds"][0]["streamSettings"]["network"], "xhttp")
+            self.assertEqual(run_cli(*common, "set-transport", "tcp"), 0)
+            written = json.loads(pathlib.Path(config).read_text(encoding="utf-8"))
+            self.assertEqual(written["inbounds"][0]["streamSettings"]["network"], "tcp")
+
+    def test_reality_ссылка_с_чужим_транспортом_отвергается(self):
+        with self.assertRaises(linkmod.LinkError):
+            linkmod.parse("vless://x@1.2.3.4:443?type=grpc&security=reality&pbk=K")
+
+
 if __name__ == "__main__":
     unittest.main()
