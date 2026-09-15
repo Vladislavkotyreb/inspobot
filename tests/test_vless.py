@@ -987,5 +987,104 @@ class Cdn(unittest.TestCase):
             self.assertEqual(run_cli(*common, "get", "cdn.нет"), 1)
 
 
+class Shadowsocks(unittest.TestCase):
+    """Вход Shadowsocks.
+
+    Ставится там, где DPI убивает рукопожатие TLS. Проверяем, что вход
+    собирается, порты не сталкиваются, ссылка разбирается обратно в тот
+    же метод и пароль, и что VLESS при этом цел.
+    """
+
+    def with_ss(self, **over):
+        ss = {"port": 443, "method": vless.SS_METHOD, "password": "cGFzc3dvcmQxMjM0NTY3OA==",
+              "name": "vpn"}
+        ss.update(over)
+        return meta(port=8443, ss=ss)
+
+    def test_вход_собирается(self):
+        config = vless.render_config(self.with_ss())
+        json.dumps(config)
+        ss = next(i for i in config["inbounds"] if i["tag"] == "shadowsocks")
+        self.assertEqual(ss["port"], 443)
+        self.assertEqual(ss["protocol"], "shadowsocks")
+        self.assertEqual(ss["settings"]["method"], vless.SS_METHOD)
+        self.assertEqual(ss["settings"]["password"], "cGFzc3dvcmQxMjM0NTY3OA==")
+        self.assertIn("udp", ss["settings"]["network"])
+
+    def test_метод_из_семейства_2022(self):
+        # Старые методы DPI опознаёт по трафику — тогда вход теряет смысл.
+        self.assertTrue(vless.SS_METHOD.startswith("2022-blake3-"))
+
+    def test_vless_цел(self):
+        config = vless.render_config(self.with_ss())
+        reality = next(i for i in config["inbounds"] if i["tag"] == "vless-reality")
+        self.assertEqual(reality["settings"]["clients"][0]["flow"], vless.FLOW)
+        self.assertEqual(reality["port"], 8443)
+
+    def test_порты_не_сталкиваются(self):
+        ports = [i["port"] for i in vless.render_config(self.with_ss())["inbounds"]]
+        self.assertEqual(len(ports), len(set(ports)), ports)
+
+    def test_ссылка_разбирается_обратно(self):
+        data = self.with_ss()
+        url = vless.ss_link(data)
+        self.assertTrue(url.startswith("ss://"), url)
+        parsed = linkmod.parse(url)
+        self.assertEqual(parsed["kind"], "ss")
+        self.assertEqual(parsed["host"], data["host"])
+        self.assertEqual(parsed["port"], 443)
+        self.assertEqual(parsed["method"], vless.SS_METHOD)
+        self.assertEqual(parsed["password"], "cGFzc3dvcmQxMjM0NTY3OA==")
+
+    def test_клиент_из_ссылки(self):
+        data = self.with_ss()
+        config = linkmod.client_config(vless.ss_link(data), 10808)
+        out = config["outbounds"][0]
+        self.assertEqual(out["protocol"], "shadowsocks")
+        server = out["settings"]["servers"][0]
+        self.assertEqual(server["address"], data["host"])
+        self.assertEqual(server["method"], vless.SS_METHOD)
+        self.assertEqual(config["inbounds"][0]["listen"], "127.0.0.1")
+
+    def test_ссылка_открытым_текстом_тоже_разбирается(self):
+        # Часть клиентов выпускает ss:// без base64 — принимать обе формы.
+        parsed = linkmod.parse("ss://2022-blake3-aes-128-gcm:cGFzcw%3D%3D@1.2.3.4:443#x")
+        self.assertEqual(parsed["method"], "2022-blake3-aes-128-gcm")
+        self.assertEqual(parsed["password"], "cGFzcw==")
+
+    def test_обрезанная_ss_ссылка_отвергается(self):
+        for broken in ("ss://@1.2.3.4:443", "ss://bWV0aG9k@1.2.3.4:443"):
+            with self.subTest(broken=broken), self.assertRaises(linkmod.LinkError):
+                linkmod.parse(broken)
+
+    def test_cli_уводит_reality_с_занятого_порта(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "h", "--port", "443", "--sni", "s",
+                    "--dest", "s:443", "--private-key", "P", "--public-key", "U",
+                    "--short-id", "a", "--client", "one")
+            self.assertEqual(run_cli(*common, "ss-setup", "--port", "443",
+                                     "--password", "cGFzc3dvcmQxMjM0NTY3OA=="), 0)
+            saved = vless.load_meta(meta_path)
+            self.assertEqual(saved["port"], 8443)
+            written = json.loads(pathlib.Path(config).read_text(encoding="utf-8"))
+            self.assertEqual(sorted(i["port"] for i in written["inbounds"]), [443, 8443])
+            self.assertEqual(run_cli(*common, "ss-clear"), 0)
+            self.assertNotIn("ss", vless.load_meta(meta_path))
+
+    def test_cli_не_даёт_занять_порт_cdn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "h", "--port", "8443", "--sni", "s",
+                    "--dest", "s:443", "--private-key", "P", "--public-key", "U",
+                    "--short-id", "a", "--client", "one")
+            run_cli(*common, "cdn-setup", "--domain", "d.com", "--cert", "/c",
+                    "--key", "/k", "--path", "/p")
+            self.assertEqual(run_cli(*common, "ss-setup", "--port", "443",
+                                     "--password", "cGFzcw=="), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

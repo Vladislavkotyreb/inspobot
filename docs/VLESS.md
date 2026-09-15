@@ -51,6 +51,8 @@ sudo sh deploy/vless.sh diagnose        # перебрать варианты
 sudo sh deploy/vless.sh set-domain X    # сменить маскировочный домен
 sudo sh deploy/vless.sh probe-links     # ссылки на несколько доменов сразу
 sudo sh deploy/vless.sh probe-clear     # убрать пробные входы
+sudo sh deploy/vless.sh ss              # вход Shadowsocks (без рукопожатия TLS)
+sudo sh deploy/vless.sh ss-clear        # убрать его
 sudo sh deploy/vless.sh cdn ДОМЕН       # маршрут через Cloudflare
 sudo sh deploy/vless.sh cdn-check       # Cloudflare достаёт до сервера?
 sudo sh deploy/vless.sh cdn-clear       # убрать маршрут через CDN
@@ -212,6 +214,41 @@ sudo sh deploy/vless.sh probe-links
 Рабочие на сегодня: `dl.google.com`, `www.bing.com`, `www.samsung.com`,
 `www.apple.com`, `addons.mozilla.org`. Свой: `VLESS_SNI=example.com` перед
 установкой или `set-domain` потом.
+
+## Когда убивают рукопожатие TLS: Shadowsocks
+
+Симптом: TCP до сервера доходит (в журнале видно соединения с адреса
+человека), а в ответ на каждое — `failed to read client hello`. На любом
+порту, с любым маскировочным доменом, с любым отпечатком, даже из голого
+браузера по `https://IP`. Значит, DPI выбрасывает пакет с рукопожатием
+TLS, и всё, что начинается с TLS, на этом адресе мертво.
+
+У Shadowsocks рукопожатия TLS нет вовсе: с первого байта идёт поток
+случайных на вид данных, опознавать нечего. Ставится тем же Xray:
+
+```bash
+sudo sh deploy/vless.sh ss        # по умолчанию на 443
+```
+
+443 не случайно: нестандартные порты операторы закрывают чаще, а на 443
+TCP обычно проходит. REALITY при этом уступает порт и уезжает на 8443 —
+его ссылки меняются, команда печатает новые. Тем, кого не режут, REALITY
+остаётся и работает как работал.
+
+Ссылку `ss://` отправлять туда, где REALITY не проходит. В Happ она
+импортируется так же, из буфера, но протокол в профиле будет
+Shadowsocks, а не VLESS.
+
+Метод — `2022-blake3-aes-128-gcm`: единственное семейство без известных
+способов опознания по трафику. Старые методы (`aes-256-gcm` и прочие)
+DPI различает, и тогда вход теряет смысл.
+
+Убрать: `sudo sh deploy/vless.sh ss-clear`.
+
+Xray 26 при запуске предупреждает, что Shadowsocks устарел в пользу
+VLESS Encryption — это правда, у SS нет forward secrecy. Но VLESS
+Encryption совсем свежий, и поддержка в клиентах пока неровная;
+Shadowsocks понимают все. Работает — и ладно.
 
 ## Когда режут сам адрес: маршрут через CDN
 

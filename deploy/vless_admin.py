@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import grp
 import json
 import os
@@ -37,6 +38,12 @@ FINGERPRINT = "chrome"
 # Отпечаток задаёт форму ClientHello, и по нему могут резать: ТСПУ
 # отбрасывают одни отпечатки и пропускают другие. Это свойство ссылки,
 # а не сервера — серверу всё равно, кем прикидывается клиент.
+# 2022-blake3 — единственное семейство Shadowsocks без известных
+# способов опознания по трафику; older-методы (aes-256-gcm и прочие)
+# DPI распознаёт.
+SS_METHOD = "2022-blake3-aes-128-gcm"
+SS_KEY_BYTES = 16
+
 FINGERPRINTS = (
     "chrome", "firefox", "safari", "ios", "android", "edge",
     "360", "qq", "random", "randomized", "randomizednoalpn",
@@ -204,6 +211,35 @@ def _cdn_inbound(meta: dict, clients: list) -> dict:
     }
 
 
+def _ss_inbound(meta: dict) -> dict:
+    """Вход Shadowsocks-2022.
+
+    Нужен там, где DPI убивает рукопожатие TLS: у Shadowsocks его нет
+    вовсе. На проводе — поток случайных на вид байт с первого байта,
+    опознавать нечего, инспектировать нечего. Шифрование при этом
+    полноценное, в отличие от «просто без TLS».
+
+    Ключи у него свои: протокол другой, клиенты VLESS сюда не ходят.
+    """
+    ss = meta["ss"]
+    return {
+        "tag": "shadowsocks",
+        "listen": "0.0.0.0",
+        "port": int(ss["port"]),
+        "protocol": "shadowsocks",
+        "settings": {
+            "method": ss["method"],
+            "password": ss["password"],
+            "network": "tcp,udp",
+        },
+        "sniffing": {
+            "enabled": True,
+            "destOverride": ["http", "tls", "quic"],
+            "routeOnly": True,
+        },
+    }
+
+
 def render_config(meta: dict, loglevel: str = "warning") -> dict:
     for key in ("port", "sni", "dest", "private_key", "short_id"):
         if not meta.get(key):
@@ -225,6 +261,8 @@ def render_config(meta: dict, loglevel: str = "warning") -> dict:
         )
     if meta.get("cdn"):
         inbounds.append(_cdn_inbound(meta, clients))
+    if meta.get("ss"):
+        inbounds.append(_ss_inbound(meta))
     return {
         # access: none — на диске не копится, кто куда ходил. Это и про
         # приватность, и про место: журнал посещений растёт быстро.
@@ -427,6 +465,23 @@ def cdn_link(meta: dict, client: dict) -> str:
     return f"vless://{client['id']}@{domain}:{cdn.get('port', 443)}?{query}#{label}"
 
 
+def ss_link(meta: dict) -> str:
+    """Ссылка Shadowsocks по SIP002.
+
+    Часть клиентов ждёт пользовательскую часть в base64url, часть —
+    открытым текстом. base64url — исходный вариант SIP002 и понимается
+    шире, поэтому он.
+    """
+    ss = meta["ss"]
+    host = meta["host"]
+    if ":" in host:
+        host = f"[{host}]"
+    userinfo = f"{ss['method']}:{ss['password']}".encode("utf-8")
+    encoded = base64.urlsafe_b64encode(userinfo).decode("ascii").rstrip("=")
+    label = quote(f"{ss.get('name', 'ss')}")
+    return f"ss://{encoded}@{host}:{ss['port']}#{label}"
+
+
 # --- командная строка ------------------------------------------------
 
 
@@ -485,6 +540,14 @@ def main(argv: list[str] | None = None) -> int:
     cdn.add_argument("--port", type=int, default=443)
     cdn.add_argument("--reality-port", type=int, default=8443,
                      help="куда уходит REALITY, если его порт занимает CDN")
+    ssup = commands.add_parser("ss-setup", help="вход Shadowsocks")
+    ssup.add_argument("--port", type=int, default=443)
+    ssup.add_argument("--method", default=SS_METHOD)
+    ssup.add_argument("--password", required=True)
+    ssup.add_argument("--name", default="ss")
+    ssup.add_argument("--reality-port", type=int, default=8443)
+    commands.add_parser("ss-link", help="ссылка Shadowsocks")
+    commands.add_parser("ss-clear", help="убрать вход Shadowsocks")
     cdnlinks = commands.add_parser("cdn-links", help="ссылки через CDN")
     cdnlinks.add_argument("name", nargs="?")
     commands.add_parser("cdn-clear", help="убрать вход через CDN")
@@ -605,6 +668,28 @@ def main(argv: list[str] | None = None) -> int:
             _apply(meta, args.config, args.meta)
             for client in meta.get("clients", []):
                 print(cdn_link(meta, client))
+        elif args.command == "ss-setup":
+            if meta.get("cdn") and int(meta["cdn"].get("port", 443)) == args.port:
+                raise VlessError(f"Порт {args.port} занят входом через CDN.")
+            meta["ss"] = {
+                "port": args.port,
+                "method": args.method,
+                "password": args.password,
+                "name": args.name,
+            }
+            # Два входа на одном порту не бывает: REALITY уступает.
+            if int(meta["port"]) == args.port:
+                meta["port"] = args.reality_port
+            _apply(meta, args.config, args.meta)
+            print(ss_link(meta))
+        elif args.command == "ss-link":
+            if not meta.get("ss"):
+                raise VlessError("Вход Shadowsocks не настроен: sudo sh deploy/vless.sh ss")
+            print(ss_link(meta))
+        elif args.command == "ss-clear":
+            meta.pop("ss", None)
+            _apply(meta, args.config, args.meta)
+            print("Вход Shadowsocks убран.")
         elif args.command == "cdn-links":
             if not meta.get("cdn"):
                 raise VlessError("Вход через CDN не настроен: sudo sh deploy/vless.sh cdn домен")
@@ -629,6 +714,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"маска:  {meta['sni']}")
             if meta.get("cdn"):
                 print(f"CDN:    {meta['cdn']['domain']}:{meta['cdn'].get('port', 443)}")
+            if meta.get("ss"):
+                print(f"SS:     порт {meta['ss']['port']}, {meta['ss']['method']}")
             print(f"клиентов: {len(meta.get('clients', []))}")
     except VlessError as error:
         print(str(error), file=sys.stderr)

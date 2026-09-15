@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import base64
 from urllib.parse import parse_qs, unquote, urlparse
 
 
@@ -22,10 +23,46 @@ class LinkError(Exception):
     """Ссылку разобрать не вышло."""
 
 
+def _pad(text: str) -> str:
+    return text + "=" * (-len(text) % 4)
+
+
+def parse_ss(link: str) -> dict:
+    """Ссылка Shadowsocks по SIP002.
+
+    Пользовательская часть бывает и в base64url, и открытым текстом —
+    клиенты выпускают обе, поэтому принимаем обе.
+    """
+    parsed = urlparse(link.strip())
+    if not parsed.hostname:
+        raise LinkError("В ссылке нет адреса сервера.")
+    userinfo = unquote(parsed.username or "")
+    if parsed.password is not None:
+        userinfo = f"{userinfo}:{unquote(parsed.password)}"
+    elif ":" not in userinfo:
+        try:
+            userinfo = base64.urlsafe_b64decode(_pad(userinfo)).decode("utf-8")
+        except Exception:
+            raise LinkError("Пользовательская часть ссылки не разбирается.")
+    method, _, password = userinfo.partition(":")
+    if not method or not password:
+        raise LinkError("В ссылке нет метода или пароля — она обрезана.")
+    return {
+        "kind": "ss",
+        "host": parsed.hostname,
+        "port": parsed.port or 443,
+        "name": unquote(parsed.fragment) or "клиент",
+        "method": method,
+        "password": password,
+    }
+
+
 def parse(link: str) -> dict:
     link = link.strip()
+    if link.startswith("ss://"):
+        return parse_ss(link)
     if not link.startswith("vless://"):
-        raise LinkError("Ссылка должна начинаться с vless://")
+        raise LinkError("Ссылка должна начинаться с vless:// или ss://")
     parsed = urlparse(link)
     if not parsed.username:
         raise LinkError("В ссылке нет идентификатора клиента.")
@@ -46,6 +83,7 @@ def parse(link: str) -> dict:
     else:
         raise LinkError(f"Это не REALITY и не TLS, а {security or 'без защиты'}.")
     return {
+        "kind": "vless",
         "id": parsed.username,
         "host": parsed.hostname,
         "port": parsed.port or 443,
@@ -64,8 +102,40 @@ def parse(link: str) -> dict:
     }
 
 
+def _socks_inbound(socks_port: int) -> dict:
+    return {
+        "tag": "socks",
+        # Только петля: иначе проверка на минуту открывает
+        # наружу незапароленный прокси.
+        "listen": "127.0.0.1",
+        "port": int(socks_port),
+        "protocol": "socks",
+        "settings": {"udp": False},
+    }
+
+
 def client_config(link: str, socks_port: int = 10808) -> dict:
     data = parse(link)
+    if data["kind"] == "ss":
+        return {
+            "log": {"loglevel": "warning"},
+            "inbounds": [_socks_inbound(socks_port)],
+            "outbounds": [
+                {
+                    "protocol": "shadowsocks",
+                    "settings": {
+                        "servers": [
+                            {
+                                "address": data["host"],
+                                "port": int(data["port"]),
+                                "method": data["method"],
+                                "password": data["password"],
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
     user = {"id": data["id"], "encryption": "none"}
     if data["flow"] and data["security"] == "reality":
         user["flow"] = data["flow"]
@@ -102,17 +172,7 @@ def client_config(link: str, socks_port: int = 10808) -> dict:
         }
     return {
         "log": {"loglevel": "warning"},
-        "inbounds": [
-            {
-                "tag": "socks",
-                # Только петля: иначе проверка на минуту открывает
-                # наружу незапароленный прокси.
-                "listen": "127.0.0.1",
-                "port": int(socks_port),
-                "protocol": "socks",
-                "settings": {"udp": False},
-            }
-        ],
+        "inbounds": [_socks_inbound(socks_port)],
         "outbounds": [
             {
                 "protocol": "vless",

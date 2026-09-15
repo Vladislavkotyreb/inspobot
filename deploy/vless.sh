@@ -17,6 +17,8 @@
 #   sudo sh deploy/vless.sh probe-clear    убрать пробные входы
 #   sudo sh deploy/vless.sh reach          доходят ли до сервера из России
 #   sudo sh deploy/vless.sh watch          смотреть, что приходит на сервер
+#   sudo sh deploy/vless.sh ss [ПОРТ]      вход Shadowsocks (без рукопожатия TLS)
+#   sudo sh deploy/vless.sh ss-clear       убрать вход Shadowsocks
 #   sudo sh deploy/vless.sh cdn ДОМЕН      маршрут через Cloudflare
 #   sudo sh deploy/vless.sh cdn-check      проверить, что Cloudflare достаёт до сервера
 #   sudo sh deploy/vless.sh cdn-clear      убрать маршрут через CDN
@@ -904,6 +906,47 @@ do_cdn_clear() {
     echo "Маршрут через CDN убран. REALITY остался на порту $(py get port)."
 }
 
+# Вход Shadowsocks-2022. Ставится там, где DPI убивает рукопожатие
+# TLS: у Shadowsocks его нет вовсе — на проводе поток случайных на вид
+# байт с первого байта, опознавать нечего. По умолчанию на 443, потому
+# что нестандартные порты у операторов закрывают чаще, а на 443 TCP
+# обычно проходит; REALITY при этом уступает порт и уезжает.
+do_ss() {
+    need_root ss
+    need_installed
+    SSPORT="${1:-443}"
+    case "$SSPORT" in
+        ''|*[!0-9]*) die "Порт числом: sudo sh deploy/vless.sh ss 443" ;;
+    esac
+
+    # Ключ ровно нужной длины: 2022-blake3-aes-128-gcm требует 16 байт.
+    PASSWORD=$(openssl rand -base64 16)
+    OLD_PORT=$(py get port)
+    py ss-setup --port "$SSPORT" --password "$PASSWORD" --name "$(hostname -s 2>/dev/null || echo vpn)" >/dev/null
+    restart_xray
+    NEW_PORT=$(py get port)
+
+    echo "=== вход Shadowsocks поднят на порту $SSPORT ==="
+    if [ "$OLD_PORT" != "$NEW_PORT" ]; then
+        echo "REALITY уступил $OLD_PORT и переехал на $NEW_PORT — его ссылки изменились."
+    fi
+    echo
+    echo "Ссылка — её и отправлять туда, где REALITY не проходит:"
+    echo
+    py ss-link
+    echo
+    echo "В Happ: «+» → из буфера обмена. Протокол Shadowsocks, не VLESS."
+    echo "Проверить со своего компьютера: sh deploy/test-link.sh '<ссылка>'"
+}
+
+do_ss_clear() {
+    need_root ss-clear
+    need_installed
+    py ss-clear
+    restart_xray
+    echo "Вход Shadowsocks убран."
+}
+
 do_status() {
     need_root status
     need_installed
@@ -949,6 +992,9 @@ case "$COMMAND" in
     probe-clear) do_probe_clear ;;
     reach)     do_reach "${1:-}" ;;
     watch)     do_watch "${1:-}" ;;
+    ss)        do_ss "${1:-}" ;;
+    ss-clear)  do_ss_clear ;;
+    ss-link)   need_root ss-link; need_installed; py ss-link ;;
     cdn)       do_cdn "${1:-}" ;;
     cdn-check) do_cdn_check ;;
     cdn-clear) do_cdn_clear ;;
