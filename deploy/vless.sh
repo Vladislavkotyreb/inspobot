@@ -19,6 +19,7 @@
 #   sudo sh deploy/vless.sh watch          смотреть, что приходит на сервер
 #   sudo sh deploy/vless.sh v6            ссылки на адрес IPv6
 #   sudo sh deploy/vless.sh v6 АДРЕС/64   настроить IPv6 и выпустить ссылки
+#   sudo sh deploy/vless.sh reset          снести всё лишнее, оставить один вход
 #   sudo sh deploy/vless.sh set-host АДРЕС новый адрес сервера в ссылках
 #   sudo sh deploy/vless.sh transport xhttp|tcp  транспорт основного входа
 #   sudo sh deploy/vless.sh ss [ПОРТ]      вход Shadowsocks (без рукопожатия TLS)
@@ -1086,6 +1087,38 @@ do_v6() {
     echo "у домашних провайдеров реже."
 }
 
+# Возврат к одному чистому входу. Пробные входы, Shadowsocks, CDN,
+# сменённый транспорт и отпечаток — всё это накапливалось во время
+# разбора, и теперь мешает: лишние открытые порты и непонятно, какая
+# ссылка от чего. Адрес и маскировочный домен сохраняются — они
+# проверены; ключи и пути перевыпускаются, они наживные.
+do_reset() {
+    need_root reset
+    need_installed
+    command -v xray >/dev/null 2>&1 || die "Нет xray."
+
+    printf 'Снести все входы и клиентов, оставить один чистый? Все ссылки станут недействительны. [y/N] '
+    read -r ANSWER
+    case "$ANSWER" in y|Y|yes|да) ;; *) echo "Отменено."; exit 0 ;; esac
+
+    KEYS=$(xray x25519)
+    PRIVATE=$(printf '%s\n' "$KEYS" | grep -i 'private' | head -1 | sed 's/.*[:=][[:space:]]*//')
+    PUBLIC=$(printf '%s\n' "$KEYS" | grep -iE 'public|password' | head -1 | sed 's/.*[:=][[:space:]]*//')
+    [ -n "$PRIVATE" ] && [ -n "$PUBLIC" ] || die "Ключи не разобрались."
+
+    NAME="${1:-phone}"
+    LINK=$(py reset --port 443 --private-key "$PRIVATE" --public-key "$PUBLIC" \
+        --short-id "$(openssl rand -hex 8)" --client "$NAME")
+    restart_xray
+
+    echo
+    echo "=== один вход, новые ключи ==="
+    echo "домен: $(py get sni), порт 443, транспорт tcp, Vision включён"
+    echo "Прежние ссылки недействительны — вот новая:"
+    show_link "$LINK"
+    echo "Проверить снаружи: sh deploy/test-link.sh '<ссылка>'"
+}
+
 do_set_host() {
     need_root "set-host $1"
     need_installed
@@ -1185,6 +1218,7 @@ case "$COMMAND" in
     reach)     do_reach "${1:-}" ;;
     watch)     do_watch "${1:-}" ;;
     v6)        do_v6 "${1:-}" ;;
+    reset)     do_reset "${1:-}" ;;
     set-host)  do_set_host "${1:-}" ;;
     transport) do_transport "${1:-}" ;;
     ss)        do_ss "${1:-}" ;;

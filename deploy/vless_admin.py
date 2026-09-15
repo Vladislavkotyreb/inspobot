@@ -573,6 +573,12 @@ def main(argv: list[str] | None = None) -> int:
                           choices=["none", "error", "warning", "info", "debug"])
     commands.add_parser("show", help="параметры сервера")
     commands.add_parser("names", help="имена клиентов, по одному в строке")
+    wipe = commands.add_parser("reset", help="один чистый вход, новые ключи")
+    wipe.add_argument("--port", type=int, default=443)
+    wipe.add_argument("--private-key", required=True)
+    wipe.add_argument("--public-key", required=True)
+    wipe.add_argument("--short-id", required=True)
+    wipe.add_argument("--client", default="phone")
     forhost = commands.add_parser("links-for", help="ссылки на другой адрес, не меняя шпаргалку")
     forhost.add_argument("host")
     fpset = commands.add_parser("fp-links", help="ссылки с разными отпечатками")
@@ -732,6 +738,24 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{client['name']}\n{link(variant, client)}\n")
             if variant.get("ss"):
                 print(f"shadowsocks\n{ss_link(variant)}\n")
+        elif args.command == "reset":
+            # Оставляем только адрес и маскировочный домен — они
+            # проверены. Всё остальное наживное: ключи, пути, входы,
+            # клиенты. Накопленное мешает и лишними портами, и тем,
+            # что непонятно, какая ссылка от чего.
+            fresh = {
+                "host": meta["host"],
+                "port": args.port,
+                "sni": meta["sni"],
+                "dest": meta["dest"],
+                "private_key": getattr(args, "private_key"),
+                "public_key": getattr(args, "public_key"),
+                "short_id": getattr(args, "short_id"),
+                "clients": [],
+            }
+            client = add_client(fresh, args.client)
+            _apply(fresh, args.config, args.meta)
+            print(link(fresh, client))
         elif args.command == "names":
             for client in meta.get("clients", []):
                 print(client["name"])

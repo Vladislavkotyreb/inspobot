@@ -1323,5 +1323,63 @@ class DualStack(unittest.TestCase):
         self.assertIn("@[2a03:4000:56:c81::1]:8500", vless.ss_link(variant))
 
 
+class Reset(unittest.TestCase):
+    """Возврат к одному чистому входу.
+
+    Во время разбора накапливаются пробные входы, Shadowsocks, CDN,
+    сменённый транспорт. Потом это мешает: лишние открытые порты и
+    непонятно, какая ссылка от чего.
+    """
+
+    def loaded(self, directory):
+        config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+        common = ["--config", config, "--meta", meta_path]
+        run_cli(*common, "init", "--host", "203.0.113.10", "--port", "8444",
+                "--sni", "dl.google.com", "--dest", "dl.google.com:443",
+                "--private-key", "СТАРЫЙ", "--public-key", "СТАРЫЙПУБ",
+                "--short-id", "aaaa", "--client", "one")
+        run_cli(*common, "set-alts", "www.bing.com:8443", "www.apple.com:8445")
+        run_cli(*common, "ss-setup", "--port", "8500", "--password", "cGFzcw==")
+        run_cli(*common, "set-transport", "xhttp", "--path", "/old")
+        run_cli(*common, "set-fingerprint", "safari")
+        run_cli(*common, "add", "two")
+        return common, config, meta_path
+
+    def test_остаётся_один_вход(self):
+        with tempfile.TemporaryDirectory() as directory:
+            common, config, meta_path = self.loaded(directory)
+            before = json.loads(pathlib.Path(config).read_text(encoding="utf-8"))
+            self.assertGreater(len(before["inbounds"]), 3)
+            self.assertEqual(run_cli(*common, "reset", "--private-key", "НОВЫЙ",
+                                     "--public-key", "НОВЫЙПУБ", "--short-id", "bbbb"), 0)
+            after = json.loads(pathlib.Path(config).read_text(encoding="utf-8"))
+            self.assertEqual(len(after["inbounds"]), 1)
+            self.assertEqual(after["inbounds"][0]["port"], 443)
+            self.assertEqual(after["inbounds"][0]["streamSettings"]["network"], "tcp")
+            self.assertEqual(after["inbounds"][0]["settings"]["clients"][0]["flow"], vless.FLOW)
+
+    def test_адрес_и_домен_сохраняются(self):
+        # Они проверены; перевыпускать их незачем.
+        with tempfile.TemporaryDirectory() as directory:
+            common, _, meta_path = self.loaded(directory)
+            run_cli(*common, "reset", "--private-key", "НОВЫЙ",
+                    "--public-key", "НОВЫЙПУБ", "--short-id", "bbbb")
+            saved = vless.load_meta(meta_path)
+            self.assertEqual(saved["host"], "203.0.113.10")
+            self.assertEqual(saved["sni"], "dl.google.com")
+
+    def test_наживное_сбрасывается(self):
+        with tempfile.TemporaryDirectory() as directory:
+            common, _, meta_path = self.loaded(directory)
+            run_cli(*common, "reset", "--private-key", "НОВЫЙ",
+                    "--public-key", "НОВЫЙПУБ", "--short-id", "bbbb")
+            saved = vless.load_meta(meta_path)
+            self.assertEqual(saved["private_key"], "НОВЫЙ")
+            self.assertEqual(saved["short_id"], "bbbb")
+            for key in ("alts", "ss", "cdn", "network", "path", "fingerprint"):
+                self.assertNotIn(key, saved, key)
+            self.assertEqual([c["name"] for c in saved["clients"]], ["phone"])
+
+
 if __name__ == "__main__":
     unittest.main()
