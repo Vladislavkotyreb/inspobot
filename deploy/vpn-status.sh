@@ -70,7 +70,7 @@ if [ -f /etc/amnezia/amneziawg/awg0.conf ]; then
     awg show awg0 2>/dev/null | sed -n '1,3p' | sed 's/^/  /' || echo "  интерфейс не поднят"
     PEERS=$(awg show awg0 2>/dev/null | grep -c '^peer:')
     echo "  клиентов: $PEERS"
-    HANDSHAKE=$(awg show awg0 latest-handshakes 2>/dev/null | awk '$2 > 0' | wc -l)
+    HANDSHAKE=$(awg show awg0 latest-handshakes 2>/dev/null | awk 'NF == 2 && $2 + 0 > 0' | wc -l)
     echo "  было рукопожатий: $HANDSHAKE"
 else
     echo "  наш не установлен"
@@ -86,16 +86,23 @@ else
     for NAME in $(docker ps --format '{{.Names}}' 2>/dev/null | grep '^amnezia'); do
         echo "  --- $NAME ---"
         docker port "$NAME" 2>/dev/null | sed 's/^/      /' || true
+        FOUND=0
         for TOOL in awg wg; do
-            OUT=$(docker exec "$NAME" "$TOOL" show 2>/dev/null)
+            OUT=$(docker exec "$NAME" "$TOOL" show 2>/dev/null | grep -v 'OCI runtime')
             [ -z "$OUT" ] && continue
+            FOUND=1
             printf '%s\n' "$OUT" | sed -n '1,4p' | sed 's/^/      /'
             PEERS=$(printf '%s\n' "$OUT" | grep -c '^peer:')
             echo "      клиентов: $PEERS"
-            SHAKES=$(docker exec "$NAME" "$TOOL" show all latest-handshakes 2>/dev/null | awk '$NF > 0' | wc -l)
+            # Строго три поля «интерфейс пир время»: иначе в счёт
+            # попадает строка с ошибкой, и получается «рукопожатие»
+            # там, где туннеля нет вовсе.
+            SHAKES=$(docker exec "$NAME" "$TOOL" show all latest-handshakes 2>/dev/null \
+                | awk 'NF == 3 && $3 + 0 > 0' | wc -l)
             echo "      было рукопожатий: $SHAKES"
             break
         done
+        [ "$FOUND" = "0" ] && echo "      (туннеля нет — это не WireGuard-контейнер)"
     done
     echo
     echo "  «было рукопожатий» больше нуля означает, что пакеты от клиента"
