@@ -18,6 +18,7 @@
 #   sudo sh deploy/vless.sh reach          доходят ли до сервера из России
 #   sudo sh deploy/vless.sh watch          смотреть, что приходит на сервер
 #   sudo sh deploy/vless.sh v6            ссылки на адрес IPv6
+#   sudo sh deploy/vless.sh v6 АДРЕС/64   настроить IPv6 и выпустить ссылки
 #   sudo sh deploy/vless.sh set-host АДРЕС новый адрес сервера в ссылках
 #   sudo sh deploy/vless.sh transport xhttp|tcp  транспорт основного входа
 #   sudo sh deploy/vless.sh ss [ПОРТ]      вход Shadowsocks (без рукопожатия TLS)
@@ -961,9 +962,70 @@ do_ss_clear() {
 # IPv6 у многих операторов слабее или отсутствует вовсе. Плюс у хостера
 # обычно выделен целый /64: если один адрес попадёт под раздачу, берётся
 # следующий, и это бесплатно.
+# Настройка адреса IPv6. Делается добавлением, а не правкой сетевых
+# настроек системы: чужой конфиг не трогаем, IPv4 не задеваем, снять
+# можно одной командой. Постоянство — отдельной службой, потому что у
+# разных сборок Debian сеть настраивается по-разному, и угадывать, в
+# какой файл писать, значит рисковать связью с сервером.
+v6_setup() {
+    ADDR="$1"
+    case "$ADDR" in
+        *:*/*) ;;
+        *) die "Нужен адрес с префиксом: sudo sh deploy/vless.sh v6 2a03:4000:56:c81::1/64" ;;
+    esac
+
+    IFACE=$(ip -o -4 route show default 2>/dev/null | awk '{print $5}' | head -1)
+    [ -n "$IFACE" ] || die "Не нашёл сетевой интерфейс."
+    # Шлюз IPv6 у хостера обычно локальный для канала; берём настоящий,
+    # если он уже известен системе, иначе общепринятый fe80::1.
+    GW=$(ip -o -6 route show default 2>/dev/null | awk '{print $3}' | head -1)
+    GW="${GW:-fe80::1}"
+
+    echo "=== настраиваю IPv6 ==="
+    echo "интерфейс: $IFACE, адрес: $ADDR, шлюз: $GW"
+
+    # Уже есть — не ошибка: команда должна переживать повторный запуск.
+    ip -6 addr add "$ADDR" dev "$IFACE" 2>/dev/null || true
+    if ! ip -6 route show default 2>/dev/null | grep -q .; then
+        ip -6 route add default via "$GW" dev "$IFACE" 2>/dev/null || true
+    fi
+
+    sleep 2
+    if curl -6 -s -m 12 https://api64.ipify.org >/dev/null 2>&1; then
+        echo "  ok    наружу по IPv6 выходим"
+    else
+        echo "  ?     наружу по IPv6 проверить не вышло — адрес задан, но" >&2
+        echo "        связи может не быть. Смотрите: ip -6 route show default" >&2
+    fi
+
+    cat > /etc/systemd/system/inspobot-ipv6.service <<UNIT
+[Unit]
+Description=IPv6 address for VPN
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'ip -6 addr add $ADDR dev $IFACE || true'
+ExecStart=/bin/sh -c 'ip -6 route show default | grep -q . || ip -6 route add default via $GW dev $IFACE'
+ExecStop=/bin/sh -c 'ip -6 addr del $ADDR dev $IFACE || true'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable inspobot-ipv6 >/dev/null 2>&1 || true
+    echo "  ok    адрес переживёт перезагрузку (служба inspobot-ipv6)"
+    echo
+}
+
 do_v6() {
     need_root v6
     need_installed
+
+    WANT="${1:-}"
+    [ -n "$WANT" ] && v6_setup "$WANT"
 
     # Глобальный адрес: не петля (::1), не локальный для канала (fe80::),
     # не уникальный локальный (fc00::/7) — снаружи они бесполезны.
@@ -974,7 +1036,12 @@ do_v6() {
         echo "У машины нет глобального адреса IPv6." >&2
         echo "Что у неё есть:" >&2
         ip -o -6 addr show 2>/dev/null | awk '{print "    " $4}' >&2
-        die "Включите IPv6 у хостера и настройте адрес, потом повторите."
+        echo >&2
+        echo "У хостера блок выделен, но на сервере адрес не задан. Задайте" >&2
+        echo "любой из блока — например, первый:" >&2
+        echo >&2
+        echo "    sudo sh deploy/vless.sh v6 2a03:4000:56:c81::1/64" >&2
+        die "Подставьте свой блок из панели хостера."
     fi
 
     # Xray должен слушать двойным стеком, иначе на IPv6 никто не придёт.
@@ -1099,7 +1166,7 @@ case "$COMMAND" in
     probe-clear) do_probe_clear ;;
     reach)     do_reach "${1:-}" ;;
     watch)     do_watch "${1:-}" ;;
-    v6)        do_v6 ;;
+    v6)        do_v6 "${1:-}" ;;
     set-host)  do_set_host "${1:-}" ;;
     transport) do_transport "${1:-}" ;;
     ss)        do_ss "${1:-}" ;;
