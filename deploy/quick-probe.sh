@@ -9,6 +9,10 @@
 # стоит центы. Не подошёл — снесли, взяли другую локацию. Дешевле
 # один раз проверить пять адресов, чем месяц платить за негодный.
 #
+# Главное здесь — последний шаг: полный запрос по HTTPS с российских
+# узлов. Проверка «доходит ли TCP» бесполезна, до заблокированного
+# адреса TCP доходит прекрасно; режут передачу данных.
+#
 # Ничего лишнего не ставит и в систему не прописывается: Xray, конфиг,
 # запуск. Сносится строкой в конце вывода.
 
@@ -34,45 +38,7 @@ HOST="${PROBE_HOST:-$(curl -s -m 10 https://api.ipify.org || true)}"
 echo "адрес: $HOST"
 
 echo
-echo "=== 2/5 доходит ли до адреса из России ==="
-# Самый дешёвый отсев: если до порта не доходят даже TCP-пакеты,
-# ставить что-либо бессмысленно — сносим и берём другой адрес.
-python3 - "$HOST" <<'INNER' || true
-import json, sys, time, urllib.request
-host = sys.argv[1]
-def get(url):
-    request = urllib.request.Request(url, headers={"Accept": "application/json",
-                                                   "User-Agent": "quick-probe"})
-    with urllib.request.urlopen(request, timeout=25) as response:
-        return json.loads(response.read().decode())
-try:
-    started = get(f"https://check-host.net/check-tcp?host={host}%3A443&max_nodes=25")
-    nodes = started.get("nodes") or {}
-    results = {}
-    for _ in range(6):
-        time.sleep(3)
-        results = get(f"https://check-host.net/check-result/{started['request_id']}")
-        if results and all(v is not None for v in results.values()):
-            break
-    ru = [(n, results.get(n)) for n, info in nodes.items()
-          if isinstance(info, list) and info and str(info[0]).lower() == "ru"]
-    ok = 0
-    for name, result in ru:
-        city = next((str(x) for x in (nodes[name][2:3] or [])), name)
-        if isinstance(result, list) and result and isinstance(result[0], dict) and "time" in result[0]:
-            print(f"  ok   {city}: {float(result[0]['time'])*1000:.0f} мс"); ok += 1
-        else:
-            print(f"  нет  {city}")
-    print(f"  из России достучались: {ok} из {len(ru)}")
-    if ru and ok == 0:
-        print("  ВНИМАНИЕ: до адреса не доходят даже TCP-пакеты.")
-        print("  Ставить нечего — сносите сервер и берите другой адрес.")
-except Exception as error:
-    print(f"  проверить не удалось: {type(error).__name__} — это не приговор адресу")
-INNER
-
-echo
-echo "=== 3/5 маскировочный домен ==="
+echo "=== 2/4 маскировочный домен ==="
 # Ответ цели обязан уложиться в 8192 байта — столько отведено под него
 # в Xray. Домен может быть безупречно доступен и при этом непригоден.
 SNI=$(python3 - $DOMAINS <<'INNER'
@@ -116,7 +82,7 @@ INNER
 echo "выбран: $SNI"
 
 echo
-echo "=== 4/5 Xray ==="
+echo "=== 3/4 Xray ==="
 if ! command -v xray >/dev/null 2>&1; then
     curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh \
         | bash -s -- install >/dev/null 2>&1 || die "Xray не установился."
@@ -162,14 +128,75 @@ ss -lnt 2>/dev/null | grep -q ":$PORT " && echo "порт $PORT слушаетс
 LINK="vless://$UUID@$HOST:$PORT?type=tcp&security=reality&encryption=none&flow=xtls-rprx-vision&pbk=$PUBLIC&fp=chrome&sni=$SNI&sid=$SHORT&spx=%2F#proba"
 
 echo
-echo "=== 5/5 ссылка ==="
+echo "=== 4/4 проверка из России ==="
+# Проверка по TCP бесполезна: до заблокированного адреса пакеты
+# доходят прекрасно, и она показывает «ok» на мёртвом сервере. Режут
+# не соединение, а передачу данных, поэтому проверяем полным запросом
+# по HTTPS — рукопожатие TLS и обмен данными. Запрос без ключа упрётся
+# в запасной ход REALITY и получит настоящий сайт: значит, данные
+# ходят.
+python3 - "$HOST" "$PORT" <<'INNER' || true
+import json, sys, time, urllib.parse, urllib.request
+
+host, port = sys.argv[1], sys.argv[2]
+
+def get(url):
+    request = urllib.request.Request(
+        url, headers={"Accept": "application/json", "User-Agent": "quick-probe"})
+    with urllib.request.urlopen(request, timeout=25) as response:
+        return json.loads(response.read().decode())
+
+try:
+    target = urllib.parse.quote(f"https://{host}:{port}/", safe="")
+    started = get(f"https://check-host.net/check-http?host={target}&max_nodes=25")
+    nodes = started.get("nodes") or {}
+    results = {}
+    for _ in range(8):
+        time.sleep(3)
+        results = get(f"https://check-host.net/check-result/{started['request_id']}")
+        if results and all(value is not None for value in results.values()):
+            break
+    rows, ok = [], 0
+    for name, info in sorted(nodes.items()):
+        if not (isinstance(info, list) and info and str(info[0]).lower() == "ru"):
+            continue
+        city = str(info[2]) if len(info) > 2 and info[2] else name
+        result = results.get(name)
+        good = (isinstance(result, list) and result and isinstance(result[0], list)
+                and result[0] and result[0][0] == 1)
+        if good:
+            ok += 1
+            rows.append(f"  ok   {city}")
+        else:
+            why = ""
+            if isinstance(result, list) and result and isinstance(result[0], list) \
+                    and len(result[0]) > 2 and result[0][2]:
+                why = f": {str(result[0][2])[:40]}"
+            rows.append(f"  нет  {city}{why}")
+    print("\n".join(rows) or "  российских узлов не досталось")
+    if rows:
+        print(f"  обменялись данными: {ok} из {len(rows)}")
+        print()
+        if ok == 0:
+            print("  АДРЕС НЕ ГОДИТСЯ. Соединение устанавливается, а данные режут —")
+            print("  то же самое будет и у живого человека. Сносите и берите другой.")
+        else:
+            print("  Адрес живой: данные по TLS из России ходят.")
+except Exception as error:
+    print(f"  проверить не удалось: {type(error).__name__} — проверьте вручную")
+INNER
+
+echo
+echo "=== ссылка ==="
 echo
 echo "$LINK"
 echo
 command -v qrencode >/dev/null 2>&1 && qrencode -t ansiutf8 -m 2 "$LINK" 2>/dev/null || true
 cat <<TEXT
 
-Отправьте ссылку тому, кто в России, и попросите подключиться.
+Если проверка выше сказала «адрес живой» — отправьте ссылку тому,
+кто в России. Если «не годится» — ссылку можно не отправлять, сносите
+сервер и берите другой адрес.
 
   Подключилось     — адрес живой, сервер можно оставлять.
   Не подключилось  — сносите сервер и берите другой адрес.

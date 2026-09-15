@@ -20,6 +20,7 @@ import json
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 API = "https://check-host.net"
@@ -57,7 +58,7 @@ def node_place(info) -> tuple[str, str]:
 
 
 def node_verdict(result) -> tuple[bool, str]:
-    """Достучались ли с этого узла.
+    """Достучались ли с этого узла по TCP.
 
     Успех — список словарей с полем time. Отказ — с полем error.
     None означает «узел ещё не ответил», это не отказ.
@@ -76,21 +77,52 @@ def node_verdict(result) -> tuple[bool, str]:
     return (False, "без результата")
 
 
-def summarize(nodes: dict, results: dict, country: str = "ru") -> dict:
+def http_verdict(result) -> tuple[bool, str]:
+    """Прошёл ли с этого узла полный запрос по HTTPS.
+
+    Это и есть та проверка, которой не хватало: TCP до заблокированного
+    адреса доходит прекрасно, а вот рукопожатие TLS и передача данных —
+    нет. Проверка по TCP на таком адресе показывает «ok» и обманывает.
+
+    Формат узла у службы: [успех, время, сообщение, код, адрес].
+    """
+    if result is None:
+        return (False, "ещё считает")
+    if not isinstance(result, list) or not result:
+        return (False, "пусто")
+    first = result[0]
+    if not isinstance(first, list) or not first:
+        return (False, "непонятный ответ")
+    ok = first[0] == 1
+    seconds = first[1] if len(first) > 1 and isinstance(first[1], (int, float)) else None
+    message = str(first[2]) if len(first) > 2 and first[2] else ""
+    if ok:
+        return (True, f"{seconds * 1000:.0f} мс" if seconds else "прошёл")
+    return (False, message[:45] or "не прошёл")
+
+
+def summarize(nodes: dict, results: dict, country: str = "ru", mode: str = "tcp") -> dict:
     """Сводка по стране: сколько узлов достучалось."""
+    verdict = http_verdict if mode == "http" else node_verdict
     rows = []
     for name, info in sorted(nodes.items()):
         place = node_place(info)
         if country and place[0] != country:
             continue
-        ok, note = node_verdict(results.get(name))
+        ok, note = verdict(results.get(name))
         rows.append({"node": name, "city": place[1], "ok": ok, "note": note})
     reached = sum(1 for row in rows if row["ok"])
     return {"rows": rows, "reached": reached, "total": len(rows)}
 
 
-def check(host: str, port: int, nodes: int = 30) -> tuple[dict, dict]:
-    started = _get(f"{API}/check-tcp?host={host}%3A{port}&max_nodes={nodes}")
+def check(host: str, port: int, nodes: int = 30, mode: str = "tcp") -> tuple[dict, dict]:
+    if mode == "http":
+        # Полный запрос: рукопожатие TLS плюс передача данных. На
+        # заблокированном адресе не проходит, в отличие от TCP.
+        target = urllib.parse.quote(f"https://{host}:{port}/", safe="")
+        started = _get(f"{API}/check-http?host={target}&max_nodes={nodes}")
+    else:
+        started = _get(f"{API}/check-tcp?host={host}%3A{port}&max_nodes={nodes}")
     request_id = started.get("request_id")
     if not request_id:
         raise ReachError("служба не выдала номер проверки")
@@ -110,18 +142,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=443)
     parser.add_argument("--country", default="ru", help="пусто — все страны")
     parser.add_argument("--nodes", type=int, default=30)
+    parser.add_argument("--mode", default="tcp", choices=["tcp", "http"],
+                        help="tcp — только соединение; http — полный запрос по TLS")
     args = parser.parse_args(argv)
 
-    print(f"Проверяю {args.host}:{args.port} с узлов check-host.net...")
+    what = "полным запросом по HTTPS" if args.mode == "http" else "по TCP"
+    print(f"Проверяю {args.host}:{args.port} {what} с узлов check-host.net...")
     try:
-        nodes, results = check(args.host, args.port, args.nodes)
+        nodes, results = check(args.host, args.port, args.nodes, args.mode)
     except ReachError as error:
         print(f"Проверить не удалось: {error}", file=sys.stderr)
         print("Это не значит, что адрес заблокирован — значит, что служба", file=sys.stderr)
         print("проверки не ответила. Повторите позже.", file=sys.stderr)
         return 2
 
-    report = summarize(nodes, results, args.country)
+    report = summarize(nodes, results, args.country, args.mode)
     if not report["total"]:
         print(f"Узлов в стране {args.country!r} не досталось — попробуйте --country ''")
         return 2
@@ -136,8 +171,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Из России достучались: {reached} из {total}")
     if reached == 0:
         print()
-        print("Ни один российский узел не подключился к этому порту.")
-        print("Менять маскировочный домен бесполезно: блокируется адрес или порт.")
+        if args.mode == "http":
+            print("Ни один российский узел не смог обменяться данными с этим адресом.")
+            print("Адрес не годится под VPN: соединение устанавливается, а данные режут.")
+        else:
+            print("Ни один российский узел не подключился к этому порту.")
+            print("Менять маскировочный домен бесполезно: блокируется адрес или порт.")
         return 1
     if reached < total:
         print()

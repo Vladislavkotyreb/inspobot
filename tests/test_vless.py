@@ -1381,5 +1381,55 @@ class Reset(unittest.TestCase):
             self.assertEqual([c["name"] for c in saved["clients"]], ["phone"])
 
 
+class ReachHttp(unittest.TestCase):
+    """Проверка полным запросом по HTTPS.
+
+    Проверка по TCP оказалась бесполезной: до заблокированного адреса
+    TCP доходит прекрасно, показывает «ok» и обманывает. Различает
+    только полный запрос — рукопожатие TLS плюс передача данных.
+    """
+
+    NODES = {
+        "ru1.node.check-host.net": ["ru", "Russia", "Moscow"],
+        "ru2.node.check-host.net": ["ru", "Russia", "Saint Petersburg"],
+    }
+
+    def test_успех(self):
+        ok, note = reach.http_verdict([[1, 0.42, "OK", "200", "203.0.113.10"]])
+        self.assertTrue(ok)
+        self.assertEqual(note, "420 мс")
+
+    def test_отказ_с_причиной(self):
+        ok, note = reach.http_verdict([[0, 10.0, "Connection timed out", None, None]])
+        self.assertFalse(ok)
+        self.assertIn("timed out", note)
+
+    def test_незаконченный_узел(self):
+        self.assertFalse(reach.http_verdict(None)[0])
+
+    def test_мусор_не_ломает(self):
+        for junk in ([], {}, "строка", [None], [{}], [[]]):
+            with self.subTest(junk=junk):
+                ok, note = reach.http_verdict(junk)
+                self.assertFalse(ok)
+                self.assertTrue(note)
+
+    def test_сводка_по_режиму_http(self):
+        results = {
+            "ru1.node.check-host.net": [[1, 0.4, "OK", "200", "203.0.113.10"]],
+            "ru2.node.check-host.net": [[0, 10.0, "Timeout", None, None]],
+        }
+        report = reach.summarize(self.NODES, results, "ru", "http")
+        self.assertEqual(report["total"], 2)
+        self.assertEqual(report["reached"], 1)
+
+    def test_режимы_не_путаются(self):
+        # Ответ TCP-проверки в режиме http и наоборот — не «успех».
+        tcp_shaped = [{"address": "1.2.3.4", "time": 0.05}]
+        http_shaped = [[1, 0.4, "OK", "200", "1.2.3.4"]]
+        self.assertFalse(reach.http_verdict(tcp_shaped)[0])
+        self.assertFalse(reach.node_verdict(http_shaped)[0])
+
+
 if __name__ == "__main__":
     unittest.main()
