@@ -776,5 +776,38 @@ class PathVerdict(unittest.TestCase):
         self.assertIn("туннеле", answer)
 
 
+class Fingerprint(unittest.TestCase):
+    """Отпечаток ClientHello — свойство ссылки, а не сервера."""
+
+    def test_по_умолчанию_chrome(self):
+        data = meta()
+        self.assertIn("fp=chrome", vless.link(data, data["clients"][0]))
+
+    def test_смена_меняет_ссылку_и_клиентский_конфиг(self):
+        data = meta(fingerprint="safari")
+        client = data["clients"][0]
+        self.assertIn("fp=safari", vless.link(data, client))
+        reality = vless.client_config(data, client)["outbounds"][0]["streamSettings"]["realitySettings"]
+        self.assertEqual(reality["fingerprint"], "safari")
+
+    def test_конфиг_сервера_от_отпечатка_не_зависит(self):
+        # Поэтому после смены не нужен перезапуск службы.
+        before = json.dumps(vless.render_config(meta()), sort_keys=True)
+        after = json.dumps(vless.render_config(meta(fingerprint="ios")), sort_keys=True)
+        self.assertEqual(before, after)
+
+    def test_cli_отвергает_неизвестный(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "h", "--port", "443", "--sni", "s",
+                    "--dest", "s:443", "--private-key", "P", "--public-key", "U",
+                    "--short-id", "a", "--client", "one")
+            with self.assertRaises(SystemExit):
+                run_cli(*common, "set-fingerprint", "netscape")
+            self.assertEqual(run_cli(*common, "set-fingerprint", "firefox"), 0)
+            self.assertEqual(vless.load_meta(meta_path)["fingerprint"], "firefox")
+
+
 if __name__ == "__main__":
     unittest.main()

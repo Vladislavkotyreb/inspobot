@@ -11,6 +11,7 @@
 #   sudo sh deploy/vless.sh selftest       пройти через туннель самому
 #   sudo sh deploy/vless.sh diagnose       перебрать варианты, если туннель не встал
 #   sudo sh deploy/vless.sh set-domain X   сменить маскировочный домен
+#   sudo sh deploy/vless.sh set-fingerprint X  сменить отпечаток ClientHello
 #   sudo sh deploy/vless.sh probe-links    ссылки на несколько доменов сразу
 #   sudo sh deploy/vless.sh probe-clear    убрать пробные входы
 #   sudo sh deploy/vless.sh reach          доходят ли до сервера из России
@@ -639,6 +640,20 @@ do_set_domain() {
 # маскировочным доменом. Человеку на той стороне отправляются все
 # ссылки разом: какая подключится, тот домен и проходит через его
 # провайдера. Иначе на каждый домен уходит круг переписки.
+# Отпечаток — свойство ссылки, серверу он безразличен: перезапуск не
+# нужен, но все прежние ссылки после смены устаревают.
+do_set_fingerprint() {
+    need_root "set-fingerprint $1"
+    need_installed
+    [ -n "$1" ] || die "Какой? sudo sh deploy/vless.sh set-fingerprint safari"
+    py set-fingerprint "$1" >/dev/null
+    echo "Отпечаток: $1. Служба не перезапускалась — ей это не нужно."
+    echo
+    echo "Ссылки изменились, раздайте новые:"
+    echo
+    py list
+}
+
 do_probe_links() {
     need_root probe-links
     need_installed
@@ -788,6 +803,7 @@ case "$COMMAND" in
     selftest)  do_selftest "${1:-}" ;;
     diagnose)  do_diagnose "${1:-}" ;;
     set-domain) do_set_domain "${1:-}" ;;
+    set-fingerprint) do_set_fingerprint "${1:-}" ;;
     probe-links) do_probe_links "${1:-}" ;;
     probe-clear) do_probe_clear ;;
     reach)     do_reach "${1:-}" ;;

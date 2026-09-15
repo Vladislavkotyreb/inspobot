@@ -34,6 +34,13 @@ UNIT = "/etc/systemd/system/xray.service"
 
 FLOW = "xtls-rprx-vision"
 FINGERPRINT = "chrome"
+# Отпечаток задаёт форму ClientHello, и по нему могут резать: ТСПУ
+# отбрасывают одни отпечатки и пропускают другие. Это свойство ссылки,
+# а не сервера — серверу всё равно, кем прикидывается клиент.
+FINGERPRINTS = (
+    "chrome", "firefox", "safari", "ios", "android", "edge",
+    "360", "qq", "random", "randomized", "randomizednoalpn",
+)
 
 # Клиент ходит через сервер наружу, и только наружу. Локальные адреса
 # закрыты: за ними на этой же машине живут бот, его база и SSH.
@@ -283,7 +290,7 @@ def link(meta: dict, client: dict, alt: dict | None = None) -> str:
         "encryption": "none",
         "flow": flow,
         "pbk": meta["public_key"],
-        "fp": FINGERPRINT,
+        "fp": meta.get("fingerprint") or FINGERPRINT,
         "sni": sni,
         "sid": meta["short_id"],
         "spx": "/",
@@ -345,7 +352,7 @@ def client_config(
                     "security": "reality",
                     "realitySettings": {
                         "serverName": meta["sni"],
-                        "fingerprint": FINGERPRINT,
+                        "fingerprint": meta.get("fingerprint") or FINGERPRINT,
                         "publicKey": meta["public_key"],
                         "shortId": meta["short_id"],
                         "spiderX": "/",
@@ -393,6 +400,8 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("names", help="имена клиентов, по одному в строке")
     domain = commands.add_parser("set-domain", help="сменить маскировочный домен")
     domain.add_argument("domain")
+    fingerprint = commands.add_parser("set-fingerprint", help="сменить отпечаток ClientHello")
+    fingerprint.add_argument("fingerprint", choices=FINGERPRINTS)
     alts = commands.add_parser("set-alts", help="пробные входы: домен:порт …")
     alts.add_argument("pairs", nargs="+")
     commands.add_parser("clear-alts", help="убрать пробные входы")
@@ -471,6 +480,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{alt['sni']} (порт {alt['port']}{note})")
                 print(link(meta, client, alt))
                 print()
+        elif args.command == "set-fingerprint":
+            meta["fingerprint"] = args.fingerprint
+            # Конфиг сервера от отпечатка не зависит — меняются только
+            # ссылки, поэтому перезапуск службы не нужен.
+            save_meta(meta, args.meta)
+            print(args.fingerprint)
         elif args.command == "set-domain":
             meta["sni"] = args.domain
             meta["dest"] = f"{args.domain}:443"
