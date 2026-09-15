@@ -17,6 +17,7 @@
 #   sudo sh deploy/vless.sh probe-clear    убрать пробные входы
 #   sudo sh deploy/vless.sh reach          доходят ли до сервера из России
 #   sudo sh deploy/vless.sh watch          смотреть, что приходит на сервер
+#   sudo sh deploy/vless.sh set-host АДРЕС новый адрес сервера в ссылках
 #   sudo sh deploy/vless.sh transport xhttp|tcp  транспорт основного входа
 #   sudo sh deploy/vless.sh ss [ПОРТ]      вход Shadowsocks (без рукопожатия TLS)
 #   sudo sh deploy/vless.sh ss-clear       убрать вход Shadowsocks
@@ -951,6 +952,34 @@ do_ss_clear() {
 # Транспорт основного входа. Голый TCP с Vision фильтры узнают по
 # рисунку трафика; xhttp заворачивает поток в обычные HTTP-запросы, и
 # рисунок получается браузерный. Vision с xhttp несовместим и снимается.
+# Смена адреса в ссылках. Xray слушает 0.0.0.0 и принимает все адреса
+# машины, поэтому добавленный у хостера второй IPv4 начинает работать
+# сразу — надо лишь выпустить ссылки на него. Прежний адрес при этом
+# продолжает работать для тех, у кого он не заблокирован.
+do_set_host() {
+    need_root "set-host $1"
+    need_installed
+    NEWHOST="${1:-}"
+    [ -n "$NEWHOST" ] || die "Какой адрес? sudo sh deploy/vless.sh set-host 1.2.3.4"
+    case "$NEWHOST" in
+        *[!0-9a-fA-F.:]*) die "Адрес $NEWHOST выглядит неправильно." ;;
+    esac
+    if ! ip -o addr show 2>/dev/null | grep -qw "$NEWHOST"; then
+        echo "ВНИМАНИЕ: адрес $NEWHOST не найден среди адресов этой машины." >&2
+        echo "Адреса, которые у неё есть:" >&2
+        ip -o -4 addr show 2>/dev/null | awk '{print "    " $4}' >&2
+        die "Сначала добавьте адрес у хостера и в систему, потом повторите."
+    fi
+    OLD=$(py get host)
+    py set-host "$NEWHOST" >/dev/null
+    echo "Адрес в ссылках: $OLD → $NEWHOST"
+    echo "Служба не перезапускалась: Xray слушает все адреса машины."
+    echo
+    echo "Новые ссылки:"
+    echo
+    py list
+}
+
 do_transport() {
     need_root "transport $1"
     need_installed
@@ -1025,6 +1054,7 @@ case "$COMMAND" in
     probe-clear) do_probe_clear ;;
     reach)     do_reach "${1:-}" ;;
     watch)     do_watch "${1:-}" ;;
+    set-host)  do_set_host "${1:-}" ;;
     transport) do_transport "${1:-}" ;;
     ss)        do_ss "${1:-}" ;;
     ss-clear)  do_ss_clear ;;

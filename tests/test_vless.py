@@ -1169,5 +1169,47 @@ class XhttpTransport(unittest.TestCase):
             linkmod.parse("vless://x@1.2.3.4:443?type=grpc&security=reality&pbk=K")
 
 
+class SetHost(unittest.TestCase):
+    """Смена адреса в ссылках.
+
+    Когда у оператора заблокирован приём данных на конкретный адрес, не
+    помогает ни один протокол — помогает только другой адрес. Xray
+    слушает 0.0.0.0, поэтому добавленный у хостера второй IPv4 работает
+    сразу: меняются только ссылки.
+    """
+
+    def test_ссылки_переезжают(self):
+        data = meta(host="203.0.113.10")
+        client = data["clients"][0]
+        self.assertIn("@203.0.113.10:", vless.link(data, client))
+        data["host"] = "198.51.100.7"
+        self.assertIn("@198.51.100.7:", vless.link(data, client))
+        self.assertNotIn("203.0.113.10", vless.link(data, client))
+
+    def test_конфиг_сервера_не_зависит_от_адреса(self):
+        # Поэтому перезапуск службы после смены не нужен.
+        before = json.dumps(vless.render_config(meta(host="203.0.113.10")), sort_keys=True)
+        after = json.dumps(vless.render_config(meta(host="198.51.100.7")), sort_keys=True)
+        self.assertEqual(before, after)
+
+    def test_пробные_и_ss_ссылки_тоже_переезжают(self):
+        data = meta(host="198.51.100.7",
+                    alts=[{"sni": "www.bing.com", "port": 8443}],
+                    ss={"port": 8500, "method": vless.SS_METHOD,
+                        "password": "cGFzcw==", "name": "vpn"})
+        self.assertIn("@198.51.100.7:8443", vless.link(data, data["clients"][0], data["alts"][0]))
+        self.assertIn("@198.51.100.7:8500", vless.ss_link(data))
+
+    def test_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "203.0.113.10", "--port", "443",
+                    "--sni", "s", "--dest", "s:443", "--private-key", "P",
+                    "--public-key", "U", "--short-id", "a", "--client", "one")
+            self.assertEqual(run_cli(*common, "set-host", "198.51.100.7"), 0)
+            self.assertEqual(vless.load_meta(meta_path)["host"], "198.51.100.7")
+
+
 if __name__ == "__main__":
     unittest.main()

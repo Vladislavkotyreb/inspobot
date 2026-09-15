@@ -548,6 +548,8 @@ def main(argv: list[str] | None = None) -> int:
     fpset.add_argument("name")
     domain = commands.add_parser("set-domain", help="сменить маскировочный домен")
     domain.add_argument("domain")
+    host = commands.add_parser("set-host", help="сменить адрес сервера в ссылках")
+    host.add_argument("host")
     transport = commands.add_parser("set-transport", help="транспорт основного входа")
     transport.add_argument("network", choices=["tcp", "xhttp"])
     transport.add_argument("--path", default="")
@@ -653,6 +655,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{alt['sni']} (порт {alt['port']}{note})")
                 print(link(meta, client, alt))
                 print()
+        elif args.command == "set-host":
+            meta["host"] = args.host
+            # Xray слушает 0.0.0.0 и так принимает все адреса машины:
+            # меняются только ссылки, конфиг сервера не трогаем.
+            save_meta(meta, args.meta)
+            print(args.host)
         elif args.command == "set-transport":
             meta["network"] = args.network
             if args.network == "xhttp":
