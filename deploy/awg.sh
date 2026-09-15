@@ -22,7 +22,8 @@ ADMIN="$DIR/awg_admin.py"
 CONF=/etc/amnezia/amneziawg/awg0.conf
 META=/etc/amnezia/amneziawg/peers.json
 IFACE=awg0
-PORT="${AWG_PORT:-51820}"
+# 55424 — как у Amnezia: 51820 режут по номеру, это штатный порт WireGuard.
+PORT="${AWG_PORT:-55424}"
 export PATH="/usr/sbin:/sbin:$PATH"
 # awg-quick сам ищет ядерный модуль; его на обычном VPS нет, и без этой
 # переменной он ругается и останавливается вместо того, чтобы взять

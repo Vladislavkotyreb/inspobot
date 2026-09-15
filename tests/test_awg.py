@@ -25,8 +25,7 @@ def meta(**over):
         "port": 51820,
         "private_key": "privSERVER0000",
         "public_key": "pubSERVER1111",
-        "params": {"Jc": 4, "Jmin": 50, "Jmax": 1000, "S1": 100, "S2": 76,
-                   "H1": 11, "H2": 22, "H3": 33, "H4": 44},
+        "params": awg.make_params(random.Random(1), header_key="hpkTEST5555"),
         "clients": [{"name": "phone", "private_key": "privCLIENT2222",
                      "public_key": "pubCLIENT3333",
                      "preshared_key": "pskSHARED4444", "address": "10.8.0.2"}],
@@ -36,32 +35,58 @@ def meta(**over):
 
 
 class Params(unittest.TestCase):
-    """Ограничения не наши, а протокола: нарушишь — туннель поднимется
-    и будет молчать, без единой ошибки в журнале."""
+    """Параметры обфускации сверены с эталоном Amnezia (протокол 3.1):
+    client/core/utils/constants/protocolConstants.h и awgInstaller.cpp
+    в amnezia-client. Это то, что раздаёт их собственное приложение.
+
+    Ограничения не наши, а протокола: нарушишь — туннель поднимется и
+    будет молчать, без единой ошибки в журнале.
+    """
+
+    def params(self, seed=0):
+        return awg.make_params(random.Random(seed), header_key="hpkTEST5555")
 
     def test_сгенерированные_проходят_проверку(self):
-        for seed in range(50):
+        for seed in range(30):
             with self.subTest(seed=seed):
-                awg.check_params(awg.make_params(random.Random(seed)))
+                awg.check_params(self.params(seed))
 
-    def test_s1_плюс_56_не_равно_s2(self):
-        for seed in range(50):
-            params = awg.make_params(random.Random(seed))
-            self.assertNotEqual(params["S1"] + 56, params["S2"])
+    def test_заголовки_штатные(self):
+        # В 3.1 их не рандомизируют: HeaderProtectionKey шифрует
+        # заголовки целиком, а случайные значения сами были бы приметой.
+        params = self.params()
+        self.assertEqual([params[f"H{n}"] for n in (1, 2, 3, 4)], [1, 2, 3, 4])
 
-    def test_заголовки_разные_и_больше_четырёх(self):
-        # До 4 включительно заняты штатными типами пакетов WireGuard.
-        for seed in range(50):
-            params = awg.make_params(random.Random(seed))
-            headers = [params[f"H{n}"] for n in (1, 2, 3, 4)]
-            self.assertEqual(len(set(headers)), 4)
-            self.assertTrue(all(value > 4 for value in headers))
+    def test_защита_заголовков_есть(self):
+        self.assertTrue(self.params()["HeaderProtectionKey"])
+
+    def test_совпадает_с_эталоном_amnezia(self):
+        params = self.params()
+        self.assertEqual(params["Jmin"], 10)
+        self.assertEqual(params["Jmax"], 50)
+        self.assertTrue(4 <= params["Jc"] <= 6)
+        for key in ("S1", "S2", "S3", "S4"):
+            self.assertEqual(params[key], 12, key)
+        self.assertEqual(params["ContentPaddingAddition"], "10-100")
+        self.assertEqual(params["RekeyAfterTime"], "100-120")
+        self.assertEqual(params["RekeyTimeout"], "3-7")
+        self.assertEqual(params["RejectAfterTime"], "150-180")
+        self.assertEqual(params["KeepaliveTimeout"], "5-15")
+        self.assertEqual(params["MaxHandshakeAttempts"], "15-20")
+        self.assertEqual(params["RandomTrailers"], "on")
+        self.assertEqual(params["DisableCookies"], "on")
+
+    def test_порт_не_штатный_для_wireguard(self):
+        # 51820 режут по одному номеру, не заглядывая внутрь.
+        self.assertNotEqual(awg.PORT, 51820)
+        self.assertEqual(awg.PORT, 55424)
 
     def test_нарушения_отвергаются(self):
-        good = awg.make_params(random.Random(1))
+        good = self.params()
         for key, value in (
-            ("Jc", 0), ("Jc", 200), ("Jmax", 5), ("S1", 5), ("S2", 200),
-            ("H1", 4), ("H2", 3),
+            ("Jc", 0), ("Jc", 200), ("Jmax", 5), ("S1", 200),
+            ("HeaderProtectionKey", ""), ("RandomTrailers", "да"),
+            ("DisableCookies", "1"),
         ):
             with self.subTest(key=key, value=value):
                 broken = dict(good)
@@ -70,22 +95,24 @@ class Params(unittest.TestCase):
                     awg.check_params(broken)
 
     def test_совпадающие_заголовки_отвергаются(self):
-        broken = awg.make_params(random.Random(1))
+        broken = self.params()
         broken["H2"] = broken["H1"]
         with self.assertRaises(awg.AwgError):
             awg.check_params(broken)
 
     def test_s1_плюс_56_равно_s2_отвергается(self):
-        broken = awg.make_params(random.Random(1))
+        broken = self.params()
         broken["S2"] = broken["S1"] + 56
         with self.assertRaises(awg.AwgError):
             awg.check_params(broken)
 
     def test_нет_поля_отвергается(self):
-        broken = awg.make_params(random.Random(1))
-        del broken["H3"]
-        with self.assertRaises(awg.AwgError):
-            awg.check_params(broken)
+        for key in ("H3", "HeaderProtectionKey", "DisableCookies"):
+            with self.subTest(key=key):
+                broken = self.params()
+                del broken[key]
+                with self.assertRaises(awg.AwgError):
+                    awg.check_params(broken)
 
 
 class Configs(unittest.TestCase):
@@ -95,10 +122,22 @@ class Configs(unittest.TestCase):
         data = meta()
         server = awg.server_config(data)
         client = awg.client_config(data, data["clients"][0])
-        for key, value in data["params"].items():
-            line = f"{key} = {value}"
+        for key in awg.PARAM_ORDER:
+            line = f"{key} = {data['params'][key]}"
             self.assertIn(line, server, key)
             self.assertIn(line, client, key)
+
+    def test_мусорный_пакет_только_у_клиента(self):
+        # Мусор шлёт клиент, серверу он не нужен — так же у Amnezia.
+        data = meta()
+        self.assertIn("I1 = ", awg.client_config(data, data["clients"][0]))
+        self.assertNotIn("I1 = ", awg.server_config(data))
+
+    def test_мусорный_пакет_прикидывается_запросом_к_icloud(self):
+        client = awg.client_config(meta(), meta()["clients"][0])
+        self.assertIn("icloud", bytes.fromhex(
+            awg.SPECIAL_JUNK_1.split("0x")[1].rstrip(">")
+        ).decode("latin-1"))
 
     def test_сервер_знает_каждого_клиента(self):
         data = meta(clients=[
@@ -158,6 +197,7 @@ class Configs(unittest.TestCase):
 
     def test_битые_параметры_валят_сборку_конфига(self):
         broken = meta()
+        broken["params"] = dict(broken["params"])
         broken["params"]["H2"] = broken["params"]["H1"]
         with self.assertRaises(awg.AwgError):
             awg.server_config(broken)
@@ -212,6 +252,7 @@ class Files(unittest.TestCase):
             awg.apply(meta(), conf, meta_path)
             before = pathlib.Path(conf).read_text(encoding="utf-8")
             broken = meta()
+            broken["params"] = dict(broken["params"])
             broken["params"]["S2"] = broken["params"]["S1"] + 56
             with self.assertRaises(awg.AwgError):
                 awg.apply(broken, conf, meta_path)

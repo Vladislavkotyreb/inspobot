@@ -28,7 +28,10 @@ META = f"{DIR}/peers.json"
 CONF = f"{DIR}/awg0.conf"
 IFACE = "awg0"
 SUBNET = "10.8.0"
-PORT = 51820
+# 55424, а не 51820: 51820 — штатный порт WireGuard, и его режут по
+# одному номеру, не заглядывая внутрь. Значение взято из эталонных
+# настроек Amnezia.
+PORT = 55424
 # 1280 — наименьший MTU, гарантированный для IPv6, и он же спасает от
 # фрагментации в мобильных сетях, где путь бывает уже обычного.
 MTU = 1280
@@ -36,68 +39,97 @@ DNS = "1.1.1.1, 8.8.8.8"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 
+# Поддельный DNS-запрос к icloud.com: первый пакет клиента выглядит как
+# обычное обращение к имени, а не как начало туннеля. Значение — из
+# эталонных настроек Amnezia, менять его смысла нет.
+SPECIAL_JUNK_1 = (
+    "<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001"
+    "c00c000100010000105a00044d583737>"
+)
+
+# Порядок важен: в конфиг они пишутся именно так.
+PARAM_ORDER = (
+    "Jc", "Jmin", "Jmax",
+    "S1", "S2", "S3", "S4",
+    "H1", "H2", "H3", "H4",
+    "HeaderProtectionKey", "ContentPaddingAddition",
+    "RekeyAfterTime", "RekeyTimeout", "RejectAfterTime",
+    "KeepaliveTimeout", "MaxHandshakeAttempts",
+    "RandomTrailers", "DisableCookies",
+)
+
 
 class AwgError(Exception):
     """Ошибка, которую надо показать человеку."""
 
 
-def make_params(rng: random.Random | None = None) -> dict:
-    """Параметры обфускации.
+def make_params(rng: random.Random | None = None, header_key: str | None = None) -> dict:
+    """Параметры обфускации по эталону Amnezia (протокол 3.1).
 
-    Ограничения не наши, а протокола, и нарушение любого из них
-    означает туннель, который поднимается и молчит:
-      Jc     — сколько мусорных пакетов слать перед рукопожатием;
-      Jmin   — меньше Jmax, иначе размер мусора не выбрать;
-      S1, S2 — размеры вставок, и S1 + 56 не равно S2, иначе
-               замусоренный пакет совпадёт по длине с настоящим;
-      H1..H4 — подменённые типы пакетов, все разные и больше 4, иначе
-               они столкнутся со штатными типами WireGuard.
+    Заголовки H1..H4 здесь штатные — 1, 2, 3, 4, — а не случайные, как
+    было в первой версии AmneziaWG. Прятать их рандомизацией больше не
+    нужно: HeaderProtectionKey шифрует их целиком, и это сильнее.
+    Случайные же заголовки, наоборот, сами по себе примета.
+
+    Значения взяты из amnezia-client (protocolConstants.h,
+    awgInstaller.cpp): это то, что раздаёт их собственное приложение, и
+    оно работает у живых людей.
     """
     rng = rng or random.SystemRandom()
-    while True:
-        s1 = rng.randint(15, 150)
-        s2 = rng.randint(15, 150)
-        if s1 + 56 != s2:
-            break
-    headers = rng.sample(range(5, 2_147_483_647), 4)
     return {
-        "Jc": rng.randint(3, 10),
-        "Jmin": 50,
-        "Jmax": 1000,
-        "S1": s1,
-        "S2": s2,
-        "H1": headers[0],
-        "H2": headers[1],
-        "H3": headers[2],
-        "H4": headers[3],
+        "Jc": rng.randint(4, 6),
+        "Jmin": 10,
+        "Jmax": 50,
+        "S1": 12,
+        "S2": 12,
+        "S3": 12,
+        "S4": 12,
+        "H1": 1,
+        "H2": 2,
+        "H3": 3,
+        "H4": 4,
+        "HeaderProtectionKey": header_key or genkey(),
+        "ContentPaddingAddition": "10-100",
+        "RekeyAfterTime": "100-120",
+        "RekeyTimeout": "3-7",
+        "RejectAfterTime": "150-180",
+        "KeepaliveTimeout": "5-15",
+        "MaxHandshakeAttempts": "15-20",
+        "RandomTrailers": "on",
+        "DisableCookies": "on",
     }
 
 
 def check_params(params: dict) -> None:
-    for key in ("Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"):
+    """Ограничения протокола. Нарушение любого даёт туннель, который
+    поднимается и молчит без единой ошибки в журнале."""
+    for key in PARAM_ORDER:
         if key not in params:
             raise AwgError(f"В параметрах обфускации нет {key}.")
-    if not 1 <= params["Jc"] <= 128:
+    if not 1 <= int(params["Jc"]) <= 128:
         raise AwgError("Jc должен быть от 1 до 128.")
-    if params["Jmin"] >= params["Jmax"]:
+    if int(params["Jmin"]) >= int(params["Jmax"]):
         raise AwgError("Jmin должен быть меньше Jmax.")
-    if params["Jmax"] > 1280:
+    if int(params["Jmax"]) > 1280:
         raise AwgError("Jmax не больше 1280.")
-    for key in ("S1", "S2"):
-        if not 15 <= params[key] <= 150:
-            raise AwgError(f"{key} должен быть от 15 до 150.")
-    if params["S1"] + 56 == params["S2"]:
+    for key in ("S1", "S2", "S3", "S4"):
+        if not 0 <= int(params[key]) <= 150:
+            raise AwgError(f"{key} должен быть от 0 до 150.")
+    # Замусоренный пакет не должен совпасть по длине с настоящим.
+    if int(params["S1"]) + 56 == int(params["S2"]):
         raise AwgError("S1 + 56 не должно равняться S2.")
-    headers = [params[f"H{n}"] for n in (1, 2, 3, 4)]
+    headers = [int(params[f"H{n}"]) for n in (1, 2, 3, 4)]
     if len(set(headers)) != 4:
         raise AwgError("H1..H4 должны быть разными.")
-    if any(value <= 4 for value in headers):
-        raise AwgError("H1..H4 должны быть больше 4: до 4 заняты штатными типами.")
+    if not params.get("HeaderProtectionKey"):
+        raise AwgError("Без HeaderProtectionKey заголовки не защищены.")
+    for key in ("RandomTrailers", "DisableCookies"):
+        if params[key] not in ("on", "off"):
+            raise AwgError(f"{key} — это on или off.")
 
 
 def _params_block(params: dict) -> str:
-    return "\n".join(f"{key} = {params[key]}" for key in
-                     ("Jc", "Jmin", "Jmax", "S1", "S2", "H1", "H2", "H3", "H4"))
+    return "\n".join(f"{key} = {params[key]}" for key in PARAM_ORDER)
 
 
 def server_config(meta: dict) -> str:
@@ -143,6 +175,7 @@ def client_config(meta: dict, client: dict) -> str:
         f"DNS = {DNS}",
         f"MTU = {MTU}",
         _params_block(meta["params"]),
+        f"I1 = {SPECIAL_JUNK_1}",
         "",
         "[Peer]",
         f"PublicKey = {meta['public_key']}",
