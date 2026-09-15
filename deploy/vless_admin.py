@@ -119,9 +119,15 @@ def service_gid(unit_path: str = UNIT) -> int | None:
 # --- конфиг Xray -----------------------------------------------------
 
 
-def _inbound(meta: dict, tag: str, port: int, sni: str, clients: list) -> dict:
+def _inbound(
+    meta: dict, tag: str, port: int, sni: str, clients: list, flow: str = FLOW
+) -> dict:
     """Один вход REALITY. Ключи и клиенты общие у всех входов: меняется
-    только порт и домен, за которым вход прячется."""
+    только порт, домен, за которым вход прячется, и наличие Vision."""
+    if flow != FLOW:
+        clients = [{**client, "flow": flow} if flow else
+                   {key: value for key, value in client.items() if key != "flow"}
+                   for client in clients]
     return {
         "tag": tag,
         "listen": "0.0.0.0",
@@ -165,7 +171,10 @@ def render_config(meta: dict, loglevel: str = "warning") -> dict:
     inbounds = [_inbound(meta, "vless-reality", meta["port"], meta["sni"], clients)]
     for index, alt in enumerate(meta.get("alts", []), start=1):
         inbounds.append(
-            _inbound(meta, f"vless-proba-{index}", alt["port"], alt["sni"], clients)
+            _inbound(
+                meta, f"vless-proba-{index}", alt["port"], alt["sni"], clients,
+                alt.get("flow", FLOW),
+            )
         )
     return {
         # access: none — на диске не копится, кто куда ходил. Это и про
@@ -264,18 +273,22 @@ def link(meta: dict, client: dict, alt: dict | None = None) -> str:
         host = f"[{host}]"
     port = alt["port"] if alt else meta["port"]
     sni = alt["sni"] if alt else meta["sni"]
-    label = f"{client['name']}-{sni}" if alt else client["name"]
+    flow = alt.get("flow", FLOW) if alt else FLOW
+    label = client["name"]
+    if alt:
+        label = f"{client['name']}-{sni}" + ("" if flow else "-novision")
     params = {
         "type": "tcp",
         "security": "reality",
         "encryption": "none",
-        "flow": FLOW,
+        "flow": flow,
         "pbk": meta["public_key"],
         "fp": FINGERPRINT,
         "sni": sni,
         "sid": meta["short_id"],
         "spx": "/",
     }
+    params = {key: value for key, value in params.items() if value != ""}
     query = urlencode(params, quote_via=quote, safe="")
     return f"vless://{client['id']}@{host}:{port}?{query}#{quote(label)}"
 
@@ -435,12 +448,15 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "set-alts":
             alternatives = []
             for pair in args.pairs:
-                if ":" not in pair:
-                    raise VlessError(f"Нужно домен:порт, а не {pair!r}.")
-                sni, _, port = pair.rpartition(":")
-                if not sni or not port.isdigit():
-                    raise VlessError(f"Нужно домен:порт, а не {pair!r}.")
-                alternatives.append({"sni": sni, "port": int(port)})
+                parts = pair.split(":")
+                if len(parts) not in (2, 3) or not parts[0] or not parts[1].isdigit():
+                    raise VlessError(f"Нужно домен:порт или домен:порт:novision, а не {pair!r}.")
+                entry = {"sni": parts[0], "port": int(parts[1])}
+                if len(parts) == 3:
+                    if parts[2] != "novision":
+                        raise VlessError(f"Третье поле может быть только novision, а не {parts[2]!r}.")
+                    entry["flow"] = ""
+                alternatives.append(entry)
             meta["alts"] = alternatives
             _apply(meta, args.config, args.meta)
             print(f"Пробных входов: {len(alternatives)}")
@@ -451,7 +467,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "alt-links":
             client = find_client(meta, args.name)
             for alt in meta.get("alts", []):
-                print(f"{alt['sni']} (порт {alt['port']})")
+                note = "" if alt.get("flow", FLOW) else ", без Vision"
+                print(f"{alt['sni']} (порт {alt['port']}{note})")
                 print(link(meta, client, alt))
                 print()
         elif args.command == "set-domain":

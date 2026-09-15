@@ -529,6 +529,27 @@ class Alts(unittest.TestCase):
         client = data["clients"][0]
         self.assertEqual(vless.link(data, client), vless.link(meta(), client))
 
+    def test_вход_без_vision(self):
+        # Vision — отдельный слой поверх REALITY со своими условиями;
+        # пробный вход без него должен быть без него с обеих сторон.
+        data = meta(alts=[{"sni": "www.bing.com", "port": 8443, "flow": ""}])
+        config = vless.render_config(data)
+        main_client = config["inbounds"][0]["settings"]["clients"][0]
+        alt_client = config["inbounds"][1]["settings"]["clients"][0]
+        self.assertEqual(main_client["flow"], vless.FLOW)
+        self.assertNotIn("flow", alt_client)
+        url = vless.link(data, data["clients"][0], data["alts"][0])
+        self.assertNotIn("flow=", url)
+        self.assertTrue(url.endswith("-novision"), url)
+        parsed = linkmod.parse(url)
+        self.assertEqual(parsed["flow"], "")
+        user = linkmod.client_config(url)["outbounds"][0]["settings"]["vnext"][0]["users"][0]
+        self.assertNotIn("flow", user)
+
+    def test_основной_вход_не_теряет_vision_из_за_пробного(self):
+        data = meta(alts=[{"sni": "www.bing.com", "port": 8443, "flow": ""}])
+        self.assertIn("flow=xtls-rprx-vision", vless.link(data, data["clients"][0]))
+
     def test_без_пробных_входов_конфиг_прежний(self):
         self.assertEqual(len(vless.render_config(meta())["inbounds"]), 1)
 

@@ -671,9 +671,11 @@ do_probe_links() {
         fi
     done
 
-    if [ -z "$PAIRS" ]; then
-        die "Ни один пробный домен не подошёл."
-    fi
+    # Плюс рабочий домен без Vision: это отдельный слой поверх REALITY
+    # со своими условиями, и снаружи его иначе не проверить.
+    while ss -lnt 2>/dev/null | grep -q ":$NEXT "; do NEXT=$((NEXT + 1)); done
+    PAIRS="$PAIRS $LIVE:$NEXT:novision"
+    echo "  $LIVE без Vision ... порт $NEXT"
 
     py set-alts $PAIRS >/dev/null
     restart_xray
