@@ -66,22 +66,52 @@ do_install() {
     echo "=== пакеты ==="
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get install -y -qq git make gcc golang-go iproute2 iptables qrencode curl >/dev/null
+    if ! apt-get install -y -qq git make gcc golang-go iproute2 iptables qrencode curl >/tmp/awg-apt.log 2>&1; then
+        echo "Пакеты не поставились. Последние строки:" >&2
+        tail -15 /tmp/awg-apt.log >&2
+        exit 1
+    fi
+    echo "go: $(go version 2>/dev/null | awk '{print $3}' || echo НЕТ)"
     command -v go >/dev/null 2>&1 || die "Go не установился — без него amneziawg-go не собрать."
     echo "go, git, make, iptables, qrencode — на месте."
 
     echo
     echo "=== сборка AmneziaWG ==="
+    # Компилятор Go прожорлив, а на машине с гигабайтом памяти рядом
+    # работают бот и Xray. Без подкачки сборка падает по нехватке
+    # памяти, и выглядит это как непонятный обрыв.
+    MEMKB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    SWAPKB=$(awk '/SwapTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    if [ "$MEMKB" -lt 2097152 ] && [ "$SWAPKB" -lt 262144 ] && [ ! -f /swapfile ]; then
+        echo "Памяти мало ($((MEMKB / 1024)) МБ) и подкачки нет — добавляю файл на 1 ГБ."
+        fallocate -l 1G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
+        chmod 600 /swapfile
+        mkswap /swapfile >/dev/null 2>&1
+        swapon /swapfile 2>/dev/null || true
+        grep -q '^/swapfile' /etc/fstab 2>/dev/null || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+        echo "Подкачка включена и переживёт перезагрузку — она полезна и боту."
+    fi
+
     BUILD=$(mktemp -d)
     # Собираем из исходников: готовых пакетов для Debian нет, а ядерный
     # модуль требует заголовков ядра и DKMS — на VPS это лишний риск.
     # Userspace-реализация работает на любом ядре.
     git clone --depth 1 -q https://github.com/amnezia-vpn/amneziawg-go.git "$BUILD/go-impl"
     git clone --depth 1 -q https://github.com/amnezia-vpn/amneziawg-tools.git "$BUILD/tools"
-    (cd "$BUILD/go-impl" && make >/dev/null 2>&1) || { rm -rf "$BUILD"; die "amneziawg-go не собрался."; }
+    if ! (cd "$BUILD/go-impl" && make >"$BUILD/go.log" 2>&1); then
+        echo "amneziawg-go не собрался. Последние строки:" >&2
+        tail -20 "$BUILD/go.log" >&2
+        rm -rf "$BUILD"
+        exit 1
+    fi
     install -m755 "$BUILD/go-impl/amneziawg-go" /usr/bin/amneziawg-go
-    (cd "$BUILD/tools/src" && make >/dev/null 2>&1 && make install >/dev/null 2>&1) \
-        || { rm -rf "$BUILD"; die "amneziawg-tools не собрались."; }
+    if ! (cd "$BUILD/tools/src" && make >"$BUILD/tools.log" 2>&1 \
+            && make install >>"$BUILD/tools.log" 2>&1); then
+        echo "amneziawg-tools не собрались. Последние строки:" >&2
+        tail -20 "$BUILD/tools.log" >&2
+        rm -rf "$BUILD"
+        exit 1
+    fi
     rm -rf "$BUILD"
     command -v awg >/dev/null 2>&1 || die "awg не установился."
     echo "$(awg --version 2>&1 | head -1)"
