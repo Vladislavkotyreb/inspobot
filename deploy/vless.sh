@@ -17,6 +17,7 @@
 #   sudo sh deploy/vless.sh probe-clear    убрать пробные входы
 #   sudo sh deploy/vless.sh reach          доходят ли до сервера из России
 #   sudo sh deploy/vless.sh watch          смотреть, что приходит на сервер
+#   sudo sh deploy/vless.sh v6            ссылки на адрес IPv6
 #   sudo sh deploy/vless.sh set-host АДРЕС новый адрес сервера в ссылках
 #   sudo sh deploy/vless.sh transport xhttp|tcp  транспорт основного входа
 #   sudo sh deploy/vless.sh ss [ПОРТ]      вход Shadowsocks (без рукопожатия TLS)
@@ -956,6 +957,50 @@ do_ss_clear() {
 # машины, поэтому добавленный у хостера второй IPv4 начинает работать
 # сразу — надо лишь выпустить ссылки на него. Прежний адрес при этом
 # продолжает работать для тех, у кого он не заблокирован.
+# Ссылки на IPv6. Списки блокировок построены вокруг IPv4, а фильтрация
+# IPv6 у многих операторов слабее или отсутствует вовсе. Плюс у хостера
+# обычно выделен целый /64: если один адрес попадёт под раздачу, берётся
+# следующий, и это бесплатно.
+do_v6() {
+    need_root v6
+    need_installed
+
+    # Глобальный адрес: не петля (::1), не локальный для канала (fe80::),
+    # не уникальный локальный (fc00::/7) — снаружи они бесполезны.
+    V6=$(ip -o -6 addr show scope global 2>/dev/null \
+        | awk '{print $4}' | cut -d/ -f1 \
+        | grep -v '^fe80' | grep -v '^fc' | grep -v '^fd' | head -1)
+    if [ -z "$V6" ]; then
+        echo "У машины нет глобального адреса IPv6." >&2
+        echo "Что у неё есть:" >&2
+        ip -o -6 addr show 2>/dev/null | awk '{print "    " $4}' >&2
+        die "Включите IPv6 у хостера и настройте адрес, потом повторите."
+    fi
+
+    # Xray должен слушать двойным стеком, иначе на IPv6 никто не придёт.
+    if ! grep -q '"listen": "::"' "$CONFIG" 2>/dev/null; then
+        echo "Конфиг слушает только IPv4 — пересобираю на двойной стек."
+        py render >/dev/null
+        restart_xray
+    fi
+    if command -v ss >/dev/null 2>&1 && ! ss -lnt 2>/dev/null | grep -q "\[::\]:$(py get port)\|\*:$(py get port)"; then
+        echo "ВНИМАНИЕ: порт $(py get port) не выглядит слушающим на IPv6." >&2
+        ss -lnt 2>/dev/null | grep ":$(py get port)" >&2 || true
+    fi
+
+    echo "=== адрес IPv6: $V6 ==="
+    echo
+    echo "Проверить, что снаружи отвечает (с любой машины с IPv6):"
+    echo "    curl -6 -sI --max-time 10 https://[$V6]/ | head -1"
+    echo
+    echo "Ссылки на него — прежние, на IPv4, продолжают работать:"
+    echo
+    py links-for "$V6"
+    echo "Если у человека нет IPv6, эти ссылки у него не подключатся —"
+    echo "это не поломка сервера. У мобильных операторов IPv6 обычно есть,"
+    echo "у домашних провайдеров реже."
+}
+
 do_set_host() {
     need_root "set-host $1"
     need_installed
@@ -1054,6 +1099,7 @@ case "$COMMAND" in
     probe-clear) do_probe_clear ;;
     reach)     do_reach "${1:-}" ;;
     watch)     do_watch "${1:-}" ;;
+    v6)        do_v6 ;;
     set-host)  do_set_host "${1:-}" ;;
     transport) do_transport "${1:-}" ;;
     ss)        do_ss "${1:-}" ;;

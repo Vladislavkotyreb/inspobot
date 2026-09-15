@@ -1211,5 +1211,52 @@ class SetHost(unittest.TestCase):
             self.assertEqual(vless.load_meta(meta_path)["host"], "198.51.100.7")
 
 
+class DualStack(unittest.TestCase):
+    """Двойной стек и ссылки на другой адрес.
+
+    «0.0.0.0» принимает только IPv4; «::» — и IPv6, и IPv4. Разница
+    важна: списки блокировок построены вокруг IPv4, а у хостера обычно
+    выделен целый блок IPv6, и это бесплатный запас свежих адресов.
+    """
+
+    def test_все_входы_слушают_оба_стека(self):
+        data = meta(alts=[{"sni": "www.bing.com", "port": 8443}],
+                    ss={"port": 8500, "method": vless.SS_METHOD,
+                        "password": "cGFzcw==", "name": "vpn"},
+                    cdn={"domain": "d.com", "cert": "/c", "key": "/k",
+                         "path": "/p", "port": 8444})
+        config = vless.render_config(data)
+        self.assertEqual(len(config["inbounds"]), 4)
+        for inbound in config["inbounds"]:
+            self.assertEqual(inbound["listen"], "::", inbound["tag"])
+
+    def test_ссылка_на_ipv6_в_скобках(self):
+        data = meta(host="2a03:4000:56:c81::1")
+        url = vless.link(data, data["clients"][0])
+        self.assertIn("@[2a03:4000:56:c81::1]:", url)
+        self.assertEqual(urlparse(url).hostname, "2a03:4000:56:c81::1")
+
+    def test_links_for_не_трогает_шпаргалку(self):
+        # Адрес нужен для пробы; прежние ссылки должны продолжать работать.
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "203.0.113.10", "--port", "443",
+                    "--sni", "s", "--dest", "s:443", "--private-key", "P",
+                    "--public-key", "U", "--short-id", "a", "--client", "one")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(vless.main(common + ["links-for", "2a03:4000:56:c81::1"]), 0)
+            printed = out.getvalue()
+            self.assertIn("@[2a03:4000:56:c81::1]:443", printed)
+            self.assertEqual(vless.load_meta(meta_path)["host"], "203.0.113.10")
+
+    def test_links_for_включает_shadowsocks(self):
+        data = meta(ss={"port": 8500, "method": vless.SS_METHOD,
+                        "password": "cGFzcw==", "name": "vpn"})
+        variant = {**data, "host": "2a03:4000:56:c81::1"}
+        self.assertIn("@[2a03:4000:56:c81::1]:8500", vless.ss_link(variant))
+
+
 if __name__ == "__main__":
     unittest.main()

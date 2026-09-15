@@ -159,7 +159,7 @@ def _inbound(
                    for client in clients]
     return {
         "tag": tag,
-        "listen": "0.0.0.0",
+        "listen": "::",
         "port": int(port),
         "protocol": "vless",
         "settings": {"clients": clients, "decryption": "none"},
@@ -205,7 +205,7 @@ def _cdn_inbound(meta: dict, clients: list) -> dict:
     plain = [{k: v for k, v in c.items() if k != "flow"} for c in clients]
     return {
         "tag": "vless-cdn",
-        "listen": "0.0.0.0",
+        "listen": "::",
         "port": int(cdn.get("port", 443)),
         "protocol": "vless",
         "settings": {"clients": plain, "decryption": "none"},
@@ -240,7 +240,7 @@ def _ss_inbound(meta: dict) -> dict:
     ss = meta["ss"]
     return {
         "tag": "shadowsocks",
-        "listen": "0.0.0.0",
+        "listen": "::",
         "port": int(ss["port"]),
         "protocol": "shadowsocks",
         "settings": {
@@ -544,6 +544,8 @@ def main(argv: list[str] | None = None) -> int:
                           choices=["none", "error", "warning", "info", "debug"])
     commands.add_parser("show", help="параметры сервера")
     commands.add_parser("names", help="имена клиентов, по одному в строке")
+    forhost = commands.add_parser("links-for", help="ссылки на другой адрес, не меняя шпаргалку")
+    forhost.add_argument("host")
     fpset = commands.add_parser("fp-links", help="ссылки с разными отпечатками")
     fpset.add_argument("name")
     domain = commands.add_parser("set-domain", help="сменить маскировочный домен")
@@ -688,6 +690,14 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{fp}:")
                 print(link(variant, client, label_suffix=f"-{fp}"))
                 print()
+        elif args.command == "links-for":
+            # Шпаргалку не трогаем: адрес нужен для пробы, а прежние
+            # ссылки должны продолжать работать.
+            variant = {**meta, "host": args.host}
+            for client in variant.get("clients", []):
+                print(f"{client['name']}\n{link(variant, client)}\n")
+            if variant.get("ss"):
+                print(f"shadowsocks\n{ss_link(variant)}\n")
         elif args.command == "names":
             for client in meta.get("clients", []):
                 print(client["name"])
