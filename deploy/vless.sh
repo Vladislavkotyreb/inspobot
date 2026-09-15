@@ -824,13 +824,21 @@ do_cdn() {
     harden_for_xray "$CRT"
 
     WSPATH="/$(openssl rand -hex 6)"
+    WSPATH2="/$(openssl rand -hex 6)"
     OLD_PORT=$(py get port)
-    py cdn-setup --domain "$DOMAIN" --cert "$CRT" --key "$KEY" --path "$WSPATH" >/dev/null
+    # 443 и 8443 — оба в списке портов, которые Cloudflare проксирует на
+    # бесплатном тарифе. REALITY уступает их и уезжает на 8444: он ходит
+    # напрямую, и порт ему безразличен.
+    py cdn-setup --domain "$DOMAIN" --cert "$CRT" --key "$KEY" \
+        --path "$WSPATH" --port 443 --ws-port 8443 --ws-path "$WSPATH2" \
+        --reality-port 8444 >/dev/null
     restart_xray
 
     NEW_PORT=$(py get port)
     echo "=== маршрут через CDN поднят ==="
-    echo "Домен: $DOMAIN, вход на 443, путь $WSPATH"
+    echo "Домен: $DOMAIN"
+    echo "  xhttp     порт 443,  путь $WSPATH"
+    echo "  websocket порт 8443, путь $WSPATH2"
     if [ "$OLD_PORT" != "$NEW_PORT" ]; then
         echo "REALITY переехал с $OLD_PORT на $NEW_PORT: 443 теперь у CDN."
         echo "Прежние REALITY-ссылки устарели — новые ниже."
@@ -839,7 +847,10 @@ do_cdn() {
     echo "Проверить, что Cloudflare настроен и достаёт до сервера:"
     echo "    sudo sh deploy/vless.sh cdn-check"
     echo
-    echo "Ссылки через CDN — их и раздавать людям в России:"
+    echo "Ссылки через CDN — их и раздавать людям в России."
+    echo "Их две: сначала пусть пробует xhttp, не пойдёт — websocket."
+    echo "Через бесплатный тариф Cloudflare xhttp проходит не всегда,"
+    echo "websocket проходит всегда, но считается устаревшим."
     echo
     py cdn-links
     echo "Ссылки REALITY (напрямую, для тех, кого не режут):"
@@ -878,20 +889,27 @@ do_cdn_check() {
         BAD=$((BAD + 1))
     fi
 
-    CODE=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "https://$DOMAIN$WSPATH" 2>/dev/null || echo 000)
-    case "$CODE" in
-        400|404|405|426)
-            echo "  ok    Cloudflare достучался до Xray (ответ $CODE на обычный запрос — так и должно быть)" ;;
-        52[0-9])
-            echo "  ПЛОХО Cloudflare не достучался до сервера (ошибка $CODE)."
-            echo "        Проверьте режим SSL/TLS = Full и что порт 443 у нас слушает Xray."
-            BAD=$((BAD + 1)) ;;
-        000)
-            echo "  ПЛОХО домен не отвечает вовсе"
-            BAD=$((BAD + 1)) ;;
-        *)
-            echo "  ?     ответ $CODE — неожиданно, но не обязательно плохо" ;;
-    esac
+    WSPORT=$(py get cdn.ws_port 2>/dev/null || echo 8443)
+    WSPATH2=$(py get cdn.ws_path 2>/dev/null || echo "$WSPATH")
+    check_path() {
+        LABEL="$1"; URL="$2"
+        CODE=$(curl -s -o /dev/null -m 20 -w '%{http_code}' "$URL" 2>/dev/null || echo 000)
+        case "$CODE" in
+            400|404|405|426)
+                echo "  ok    $LABEL: Cloudflare достучался до Xray (ответ $CODE — так и должно быть)" ;;
+            52[0-9])
+                echo "  ПЛОХО $LABEL: Cloudflare не достучался до сервера (ошибка $CODE)."
+                echo "        Проверьте режим SSL/TLS = Full и что порт слушает Xray."
+                BAD=$((BAD + 1)) ;;
+            000)
+                echo "  ПЛОХО $LABEL: не отвечает вовсе"
+                BAD=$((BAD + 1)) ;;
+            *)
+                echo "  ?     $LABEL: ответ $CODE — неожиданно, но не обязательно плохо" ;;
+        esac
+    }
+    check_path "xhttp 443" "https://$DOMAIN$WSPATH"
+    check_path "websocket $WSPORT" "https://$DOMAIN:$WSPORT$WSPATH2"
 
     echo
     if [ "$BAD" = "0" ]; then

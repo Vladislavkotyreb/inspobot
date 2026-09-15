@@ -201,23 +201,47 @@ def _cdn_inbound(meta: dict, clients: list) -> dict:
     Cloudflare пропускает как есть. Vision с этим несовместим: flow у
     клиентов снимаем.
     """
+    return _cdn_variant(meta, clients, "xhttp")
+
+
+def _cdn_ws_inbound(meta: dict, clients: list) -> dict:
+    """То же, но поверх WebSocket.
+
+    Держится запасным: Xray 26 считает WebSocket устаревшим, зато через
+    бесплатный тариф CDN он проходит всегда, а XHTTP — не у всех. Когда
+    круг переписки стоит дня, дешевле поднять оба сразу.
+    """
+    return _cdn_variant(meta, clients, "ws")
+
+
+def _cdn_variant(meta: dict, clients: list, transport: str) -> dict:
     cdn = meta["cdn"]
     plain = [{k: v for k, v in c.items() if k != "flow"} for c in clients]
+    if transport == "ws":
+        tag, port = "vless-cdn-ws", int(cdn.get("ws_port", 8443))
+        path = cdn.get("ws_path") or cdn["path"]
+        settings = {"wsSettings": {"path": path}}
+        network = "ws"
+    else:
+        tag, port = "vless-cdn", int(cdn.get("port", 443))
+        path = cdn["path"]
+        settings = {"xhttpSettings": {"path": path}}
+        network = "xhttp"
     return {
-        "tag": "vless-cdn",
+        "tag": tag,
         "listen": "::",
-        "port": int(cdn.get("port", 443)),
+        "port": port,
         "protocol": "vless",
         "settings": {"clients": plain, "decryption": "none"},
         "streamSettings": {
-            "network": "xhttp",
+            "network": network,
             "security": "tls",
             "tlsSettings": {
                 "certificates": [
                     {"certificateFile": cdn["cert"], "keyFile": cdn["key"]}
                 ],
             },
-            "xhttpSettings": {"path": cdn["path"]},
+            **settings,
         },
         "sniffing": {
             "enabled": True,
@@ -282,6 +306,7 @@ def render_config(meta: dict, loglevel: str = "warning") -> dict:
         )
     if meta.get("cdn"):
         inbounds.append(_cdn_inbound(meta, clients))
+        inbounds.append(_cdn_ws_inbound(meta, clients))
     if meta.get("ss"):
         inbounds.append(_ss_inbound(meta))
     return {
@@ -471,25 +496,29 @@ def client_config(
     }
 
 
-def cdn_link(meta: dict, client: dict) -> str:
+def cdn_link(meta: dict, client: dict, transport: str = "xhttp") -> str:
     """Ссылка на вход через CDN: адрес — домен, а не наш IP."""
     cdn = meta["cdn"]
     domain = cdn["domain"]
     params = {
-        "type": "xhttp",
+        "type": transport,
         "security": "tls",
         "encryption": "none",
         "sni": domain,
         "host": domain,
-        "path": cdn["path"],
-        # packet-up — режим для CDN: загрузка отдельными POST, скачивание
-        # одним потоком. stream-up через Cloudflare не проходит.
-        "mode": "packet-up",
+        "path": cdn["path"] if transport == "xhttp" else (cdn.get("ws_path") or cdn["path"]),
         "fp": meta.get("fingerprint") or FINGERPRINT,
     }
+    if transport == "xhttp":
+        # packet-up — режим для CDN: загрузка отдельными POST, скачивание
+        # одним потоком. stream-up через Cloudflare не проходит.
+        params["mode"] = "packet-up"
+        port = int(cdn.get("port", 443))
+    else:
+        port = int(cdn.get("ws_port", 8443))
     query = urlencode(params, quote_via=quote, safe="")
-    label = quote(client["name"] + "-cdn")
-    return f"vless://{client['id']}@{domain}:{cdn.get('port', 443)}?{query}#{label}"
+    label = quote(f"{client['name']}-cdn-{transport}")
+    return f"vless://{client['id']}@{domain}:{port}?{query}#{label}"
 
 
 def ss_link(meta: dict) -> str:
@@ -572,7 +601,11 @@ def main(argv: list[str] | None = None) -> int:
     cdn.add_argument("--key", required=True)
     cdn.add_argument("--path", required=True)
     cdn.add_argument("--port", type=int, default=443)
-    cdn.add_argument("--reality-port", type=int, default=8443,
+    cdn.add_argument("--ws-port", type=int, default=8443)
+    cdn.add_argument("--ws-path", default="")
+    # 8444, а не 8443: 8443 забирает websocket-вход CDN, и умолчания
+    # столкнулись бы между собой.
+    cdn.add_argument("--reality-port", type=int, default=8444,
                      help="куда уходит REALITY, если его порт занимает CDN")
     ssup = commands.add_parser("ss-setup", help="вход Shadowsocks")
     ssup.add_argument("--port", type=int, default=443)
@@ -626,7 +659,8 @@ def main(argv: list[str] | None = None) -> int:
             for client in clients:
                 print(f"{client['name']}\n{link(meta, client)}")
                 if meta.get("cdn"):
-                    print(f"через CDN:\n{cdn_link(meta, client)}")
+                    for transport in ("xhttp", "ws"):
+                        print(f"через CDN ({transport}):\n{cdn_link(meta, client, transport)}")
                 print()
         elif args.command == "render":
             write_config(meta, args.config, loglevel=args.loglevel)
@@ -715,13 +749,23 @@ def main(argv: list[str] | None = None) -> int:
                 "key": args.key,
                 "path": args.path,
                 "port": args.port,
+                "ws_port": args.ws_port,
+                "ws_path": args.ws_path or args.path,
             }
-            # Два входа на одном порту не бывает: REALITY уступает.
-            if int(meta["port"]) == args.port:
+            # Два входа на одном порту не бывает: REALITY уступает оба
+            # порта, которые забирает CDN, и уезжает на свой.
+            taken = {args.port, args.ws_port}
+            if int(meta["port"]) in taken:
+                if args.reality_port in taken:
+                    raise VlessError(
+                        f"Порт {args.reality_port} для REALITY тоже занят CDN. "
+                        "Задайте другой через --reality-port."
+                    )
                 meta["port"] = args.reality_port
             _apply(meta, args.config, args.meta)
             for client in meta.get("clients", []):
-                print(cdn_link(meta, client))
+                for transport in ("xhttp", "ws"):
+                    print(cdn_link(meta, client, transport))
         elif args.command == "ss-setup":
             if meta.get("cdn") and int(meta["cdn"].get("port", 443)) == args.port:
                 raise VlessError(f"Порт {args.port} занят входом через CDN.")
@@ -749,7 +793,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise VlessError("Вход через CDN не настроен: sudo sh deploy/vless.sh cdn домен")
             targets = [find_client(meta, args.name)] if args.name else meta.get("clients", [])
             for client in targets:
-                print(f"{client['name']}\n{cdn_link(meta, client)}\n")
+                for transport in ("xhttp", "ws"):
+                    print(f"{client['name']} · {transport}\n{cdn_link(meta, client, transport)}\n")
         elif args.command == "cdn-clear":
             meta.pop("cdn", None)
             _apply(meta, args.config, args.meta)

@@ -849,9 +849,9 @@ class Cdn(unittest.TestCase):
 
     def with_cdn(self, **over):
         cdn = {"domain": "vpn.example.com", "cert": "/c.crt", "key": "/c.key",
-               "path": "/abc123", "port": 443}
+               "path": "/abc123", "port": 443, "ws_port": 8443, "ws_path": "/ws456"}
         cdn.update(over)
-        return meta(port=8443, cdn=cdn)
+        return meta(port=8444, cdn=cdn)
 
     def test_вход_собирается(self):
         config = vless.render_config(self.with_cdn())
@@ -902,7 +902,7 @@ class Cdn(unittest.TestCase):
         self.assertEqual(query["host"], "vpn.example.com")
         self.assertNotIn("flow", query)
         self.assertNotIn("pbk", query)
-        self.assertTrue(url.endswith("#vlad-iphone-cdn"), url)
+        self.assertTrue(url.endswith("#vlad-iphone-cdn-xhttp"), url)
 
     def test_ссылка_разбирается_и_даёт_тот_же_клиент(self):
         data = self.with_cdn()
@@ -940,6 +940,71 @@ class Cdn(unittest.TestCase):
         self.assertEqual(parsed["security"], "reality")
         self.assertEqual(parsed["transport"], "tcp")
 
+    def test_второй_вход_на_websocket(self):
+        # Через бесплатный тариф CDN xhttp проходит не всегда, websocket
+        # проходит всегда: поднимаем оба, чтобы не терять круг переписки.
+        config = vless.render_config(self.with_cdn())
+        ws = next(i for i in config["inbounds"] if i["tag"] == "vless-cdn-ws")
+        self.assertEqual(ws["port"], 8443)
+        self.assertEqual(ws["streamSettings"]["network"], "ws")
+        self.assertEqual(ws["streamSettings"]["security"], "tls")
+        self.assertEqual(ws["streamSettings"]["wsSettings"]["path"], "/ws456")
+        self.assertNotIn("flow", ws["settings"]["clients"][0])
+
+    def test_оба_входа_на_одном_сертификате_и_клиентах(self):
+        config = vless.render_config(self.with_cdn())
+        by_tag = {i["tag"]: i for i in config["inbounds"]}
+        left = by_tag["vless-cdn"]["streamSettings"]["tlsSettings"]
+        right = by_tag["vless-cdn-ws"]["streamSettings"]["tlsSettings"]
+        self.assertEqual(left["certificates"], right["certificates"])
+        self.assertEqual(
+            by_tag["vless-cdn"]["settings"]["clients"],
+            by_tag["vless-cdn-ws"]["settings"]["clients"],
+        )
+
+    def test_ссылка_websocket(self):
+        data = self.with_cdn()
+        url = vless.cdn_link(data, data["clients"][0], "ws")
+        parsed = urlparse(url)
+        self.assertEqual(parsed.hostname, "vpn.example.com")
+        self.assertEqual(parsed.port, 8443)
+        query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+        self.assertEqual(query["type"], "ws")
+        self.assertEqual(query["path"], "/ws456")
+        self.assertNotIn("mode", query)
+        self.assertTrue(url.endswith("#vlad-iphone-cdn-ws"), url)
+        # Клиент из неё собирается тем же, что ждёт сервер.
+        stream = linkmod.client_config(url)["outbounds"][0]["streamSettings"]
+        self.assertEqual(stream["network"], "ws")
+        self.assertEqual(stream["wsSettings"]["path"], "/ws456")
+
+    def test_reality_уступает_оба_порта_cdn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "h", "--port", "8443", "--sni", "s",
+                    "--dest", "s:443", "--private-key", "P", "--public-key", "U",
+                    "--short-id", "a", "--client", "one")
+            # REALITY стоял ровно на том порту, который забирает websocket.
+            self.assertEqual(run_cli(*common, "cdn-setup", "--domain", "d.com",
+                                     "--cert", "/c", "--key", "/k", "--path", "/p",
+                                     "--ws-port", "8443", "--reality-port", "8444"), 0)
+            self.assertEqual(vless.load_meta(meta_path)["port"], 8444)
+            written = json.loads(pathlib.Path(config).read_text(encoding="utf-8"))
+            ports = sorted(i["port"] for i in written["inbounds"])
+            self.assertEqual(ports, [443, 8443, 8444])
+
+    def test_reality_порт_не_может_совпасть_с_cdn(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
+            common = ["--config", config, "--meta", meta_path]
+            run_cli(*common, "init", "--host", "h", "--port", "443", "--sni", "s",
+                    "--dest", "s:443", "--private-key", "P", "--public-key", "U",
+                    "--short-id", "a", "--client", "one")
+            self.assertEqual(run_cli(*common, "cdn-setup", "--domain", "d.com",
+                                     "--cert", "/c", "--key", "/k", "--path", "/p",
+                                     "--ws-port", "8443", "--reality-port", "8443"), 1)
+
     def test_cli_setup_уводит_reality_с_занятого_порта(self):
         with tempfile.TemporaryDirectory() as directory:
             config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
@@ -950,26 +1015,26 @@ class Cdn(unittest.TestCase):
             self.assertEqual(run_cli(*common, "cdn-setup", "--domain", "d.com",
                                      "--cert", "/c", "--key", "/k", "--path", "/p"), 0)
             saved = vless.load_meta(meta_path)
-            self.assertEqual(saved["port"], 8443)
+            self.assertEqual(saved["port"], 8444)
             self.assertEqual(saved["cdn"]["domain"], "d.com")
             written = json.loads(pathlib.Path(config).read_text(encoding="utf-8"))
-            self.assertEqual(sorted(i["port"] for i in written["inbounds"]), [443, 8443])
+            self.assertEqual(sorted(i["port"] for i in written["inbounds"]), [443, 8443, 8444])
             # Убрали — REALITY остаётся там, куда его увели: ссылки уже розданы.
             self.assertEqual(run_cli(*common, "cdn-clear"), 0)
             saved = vless.load_meta(meta_path)
             self.assertNotIn("cdn", saved)
-            self.assertEqual(saved["port"], 8443)
+            self.assertEqual(saved["port"], 8444)
 
     def test_cli_setup_не_трогает_порт_если_свободен(self):
         with tempfile.TemporaryDirectory() as directory:
             config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
             common = ["--config", config, "--meta", meta_path]
-            run_cli(*common, "init", "--host", "h", "--port", "8443", "--sni", "s",
+            run_cli(*common, "init", "--host", "h", "--port", "8500", "--sni", "s",
                     "--dest", "s:443", "--private-key", "P", "--public-key", "U",
                     "--short-id", "a", "--client", "one")
             run_cli(*common, "cdn-setup", "--domain", "d.com",
                     "--cert", "/c", "--key", "/k", "--path", "/p")
-            self.assertEqual(vless.load_meta(meta_path)["port"], 8443)
+            self.assertEqual(vless.load_meta(meta_path)["port"], 8500)
 
     def test_get_вложенное_поле(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1077,7 +1142,7 @@ class Shadowsocks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             config, meta_path = f"{directory}/config.json", f"{directory}/reality.json"
             common = ["--config", config, "--meta", meta_path]
-            run_cli(*common, "init", "--host", "h", "--port", "8443", "--sni", "s",
+            run_cli(*common, "init", "--host", "h", "--port", "8500", "--sni", "s",
                     "--dest", "s:443", "--private-key", "P", "--public-key", "U",
                     "--short-id", "a", "--client", "one")
             run_cli(*common, "cdn-setup", "--domain", "d.com", "--cert", "/c",
@@ -1224,9 +1289,9 @@ class DualStack(unittest.TestCase):
                     ss={"port": 8500, "method": vless.SS_METHOD,
                         "password": "cGFzcw==", "name": "vpn"},
                     cdn={"domain": "d.com", "cert": "/c", "key": "/k",
-                         "path": "/p", "port": 8444})
+                         "path": "/p", "port": 8446, "ws_port": 8447})
         config = vless.render_config(data)
-        self.assertEqual(len(config["inbounds"]), 4)
+        self.assertEqual(len(config["inbounds"]), 5)
         for inbound in config["inbounds"]:
             self.assertEqual(inbound["listen"], "::", inbound["tag"])
 
