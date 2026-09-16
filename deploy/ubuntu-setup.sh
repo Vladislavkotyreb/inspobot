@@ -59,8 +59,18 @@ say "пакеты"
 # `python3 -m venv` падает с советом поставить пакет, которого нет.
 # ca-certificates нужен curl и git для проверки TLS, tzdata — для пояса.
 export DEBIAN_FRONTEND=noninteractive
-$SUDO apt-get update -qq
-$SUDO apt-get install -y -qq python3 python3-venv python3-pip git curl ca-certificates tzdata
+# Обновление списка пакетов не должно быть приговором: один сломанный
+# сторонний репозиторий (PPA, зеркало провайдера) возвращает ненулевой код,
+# и под set -e установка падала бы там, где нужные пакеты лежат в основном
+# архиве и прекрасно ставятся. Настоящая проверка — следующая строка.
+$SUDO apt-get update -qq || echo "список пакетов обновился не весь — продолжаю"
+if ! $SUDO apt-get install -y -qq python3 python3-venv python3-pip git curl ca-certificates tzdata; then
+    echo >&2
+    echo "Пакеты не поставились. Обычно это сломанный репозиторий в" >&2
+    echo "/etc/apt/sources.list.d/ — уберите лишний и повторите:" >&2
+    echo "    sudo apt-get update && sudo apt-get install -y python3-venv git curl" >&2
+    exit 1
+fi
 python3 --version
 if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
     echo "Python старее 3.11 — зависимости не поставятся." >&2
