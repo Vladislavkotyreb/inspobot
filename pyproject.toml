@@ -10,6 +10,7 @@ dependencies = [
 
 [project.scripts]
 inspobot-daily = "inspobot.daily:main"
+inspobot-feed = "inspobot.feed:main"
 inspobot-setup = "inspobot.setup_cli:main"
 inspobot-auth = "inspobot.auth_cli:main"
 inspobot-doctor = "inspobot.doctor:main"

@@ -9,6 +9,7 @@ from datetime import date
 
 from .catalog import Topic
 from .profile import Slot
+from .sources import SectionSpec
 
 
 @dataclass(frozen=True)
@@ -66,3 +67,51 @@ class Digest:
             if section.slot.kind == "s"
             for pick in section.picks
         )
+
+
+# --- лента из открытых источников -------------------------------------------
+# Второй дайджест бота: сайты дня, кейсы студий, Behance, Dribbble, DProfile,
+# Made on Tilda, новые приложения. Собирается без единого обращения к модели —
+# всё это источники и так публикуют машиночитаемо, — поэтому и данные здесь
+# другие: ни оценки, ни разбора, зато автор, лайки и дата.
+
+
+@dataclass(frozen=True)
+class Find:
+    """Находка ленты. `origin` — подпись источника в карточке: раздел один
+    («Dribbble»), а источников в нём три, и без подписи непонятно, из какой
+    категории шот."""
+
+    source: str
+    origin: str
+    url: str
+    title: str
+    author: str = ""
+    image: str = ""
+    summary: str = ""
+    published: date | None = None
+    likes: int = 0
+    tags: tuple[str, ...] = ()
+
+    @property
+    def label(self) -> str:
+        return self.title or self.author or self.url
+
+
+@dataclass(frozen=True)
+class Block:
+    spec: SectionSpec
+    finds: tuple[Find, ...]
+
+    def title(self) -> str:
+        return self.spec.title
+
+
+@dataclass(frozen=True)
+class Feed:
+    day: date
+    blocks: tuple[Block, ...]
+
+    @property
+    def finds(self) -> tuple[Find, ...]:
+        return tuple(find for block in self.blocks for find in block.finds)

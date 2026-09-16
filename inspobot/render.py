@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date
 from html import escape
 
-from .models import Digest, Pick, Section
+from .models import Block, Digest, Feed, Find, Pick, Section
 from .state import StoredPick
 
 MONTHS_GENITIVE = (
@@ -144,3 +144,81 @@ def top_caption_html(rank: int, pick: StoredPick) -> str:
         parts.append(escape(pick.note))
     parts.append(f"<i>{escape(human_date(pick.day))}</i>")
     return _clip("\n".join(parts), CAPTION_LIMIT)
+
+
+# --- лента из открытых источников -------------------------------------------
+
+
+def _likes_word(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return "лайк"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return "лайка"
+    return "лайков"
+
+
+def grouped(number: int) -> str:
+    """Разряды неразрывными пробелами: «1 234» не должно рваться переносом."""
+    return f"{number:,}".replace(",", " ")
+
+
+def feed_header_html(feed: Feed, remembered: int = 0) -> str:
+    """Шапка ленты: что внутри и сколько. Первое, что видно утром, поэтому
+    состав перечисляется целиком — по нему сразу понятно, какой источник
+    сегодня промолчал."""
+    lines = [f"<b>Дайджест на {escape(human_date(feed.day))}</b>", ""]
+    for block in feed.blocks:
+        lines.append(
+            f"{block.spec.icon} {escape(block.spec.title)} — {len(block.finds)}"
+        )
+    if not feed.blocks:
+        lines.append("Сегодня ни один источник ничего нового не отдал.")
+    elif remembered:
+        lines += ["", f"Новых ссылок: {grouped(remembered)}. Повторов не будет."]
+    return _clip("\n".join(lines), MESSAGE_LIMIT)
+
+
+def find_caption_html(block: Block, find: Find, index: int, total: int) -> str:
+    # Раздел коротким именем, а внутри — чем именно этот источник отличается
+    # от соседних: «Dribbble · Product», «Студии · Red Collar».
+    where = [block.spec.name()]
+    if find.origin and find.origin.strip().lower() != block.spec.name().strip().lower():
+        where.append(find.origin)
+    head = f"{block.spec.icon} {escape(' · '.join(where))} · {index}/{total}"
+    parts = [head, f"<b>{escape(find.label)}</b>"]
+
+    line = []
+    if find.author:
+        line.append(escape(find.author))
+    if find.likes:
+        # Неразрывный пробел между числом и словом: «1 234 лайка» не должно
+        # разъезжаться по двум строкам подписи.
+        line.append(f"♥ {escape(grouped(find.likes))} {_likes_word(find.likes)}")
+    if find.published:
+        line.append(escape(human_date(find.published)))
+    if line:
+        parts.append(" · ".join(line))
+
+    # Описание не повторяет заголовок: у половины сайтов og:description — это
+    # он же, и карточка выглядела бы как заикание.
+    if find.summary and find.summary.strip().lower() != find.label.strip().lower():
+        parts.append(escape(find.summary))
+    return _clip("\n".join(parts), CAPTION_LIMIT)
+
+
+FIND_LABEL = "Открыть"
+
+
+def find_keyboard(find: Find) -> dict:
+    return {"inline_keyboard": [[{"text": FIND_LABEL, "url": find.url}]]}
+
+
+def find_text_html(block: Block, find: Find, index: int, total: int) -> str:
+    """То же самое, но для находки без картинки: ссылка уезжает в текст.
+
+    Кнопка под сообщением тоже будет, но текстовая ссылка нужна на случай,
+    когда сообщение переслали — inline-кнопки при пересылке не выживают.
+    """
+    body = find_caption_html(block, find, index, total)
+    tail = f'\n\n<a href="{escape(find.url, quote=True)}">{escape(find.url)}</a>'
+    return _clip(body, MESSAGE_LIMIT - len(tail)) + tail

@@ -62,6 +62,13 @@ class Config:
     chats_path: Path
     image_mode: str
     top_buttons: bool
+    # --- лента из открытых источников ---
+    sources_path: Path
+    studios_path: Path
+    feed_image_mode: str
+    feed_shots: bool
+    feed_shot_url: str
+    feed_robots: bool
     timezone: str
     hour: int
     minute: int
@@ -91,6 +98,21 @@ class Config:
             chats_path=Path(os.environ.get("INSPOBOT_CHATS", str(var_dir / "chats.txt"))),
             image_mode=os.environ.get("INSPOBOT_IMAGE_MODE", "document").strip().lower(),
             top_buttons=_bool("INSPOBOT_TOP_BUTTONS", False),
+            sources_path=Path(
+                os.environ.get("INSPOBOT_SOURCES", str(var_dir / "sources.json"))
+            ),
+            studios_path=Path(
+                os.environ.get("INSPOBOT_STUDIOS", str(var_dir / "studios.txt"))
+            ),
+            # У ленты картинки другие: обложка кейса и снимок сайта, а не
+            # скриншот с мелким текстом. Сжатие им не вредит, а плиткой в
+            # чате они читаются лучше, чем столбиком файлов.
+            feed_image_mode=os.environ.get(
+                "INSPOBOT_FEED_IMAGE_MODE", "photo"
+            ).strip().lower(),
+            feed_shots=_bool("INSPOBOT_FEED_SHOTS", True),
+            feed_shot_url=os.environ.get("INSPOBOT_SHOT_URL", "").strip(),
+            feed_robots=_bool("INSPOBOT_FEED_ROBOTS", True),
             timezone=os.environ.get("INSPOBOT_TZ", "Europe/Moscow").strip(),
             hour=_int("INSPOBOT_HOUR", 11),
             minute=_int("INSPOBOT_MINUTE", 0),

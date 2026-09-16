@@ -54,6 +54,29 @@ CREATE TABLE IF NOT EXISTS picks (
 );
 CREATE INDEX IF NOT EXISTS picks_day_score ON picks(day DESC, score DESC);
 
+-- Лента из открытых источников. Память по адресу, а не по id: у семи
+-- разных сайтов нет общего идентификатора, а ссылка есть всегда. Ключ —
+-- нормализованный адрес (harvest.link_key), чтобы один и тот же кейс с
+-- utm-метками и без них не пришёл дважды.
+CREATE TABLE IF NOT EXISTS links (
+    link_key TEXT PRIMARY KEY,
+    source   TEXT NOT NULL,
+    url      TEXT NOT NULL,
+    title    TEXT,
+    sent_on  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS links_sent ON links(sent_on DESC);
+
+CREATE TABLE IF NOT EXISTS feed_runs (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    day        TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ok         INTEGER NOT NULL DEFAULT 0,
+    finds      INTEGER NOT NULL DEFAULT 0,
+    error      TEXT
+);
+CREATE INDEX IF NOT EXISTS feed_runs_day ON feed_runs(day);
+
 CREATE TABLE IF NOT EXISTS deliveries (
     pick_id     INTEGER NOT NULL REFERENCES picks(id),
     chat_id     TEXT NOT NULL,
@@ -69,6 +92,17 @@ class SeenScreen:
     platform: str
     app_name: str
     mobbin_url: str
+
+
+@dataclass(frozen=True)
+class SentLink:
+    """Строка памяти ленты. Отдельно от Find, потому что базе не нужны ни
+    картинка, ни лайки: её работа — помнить, что этот адрес уже был."""
+
+    link_key: str
+    source: str
+    url: str
+    title: str
 
 
 @dataclass(frozen=True)
@@ -267,3 +301,63 @@ class Store:
             if len(chosen) >= limit:
                 break
         return chosen
+
+    # --- лента -------------------------------------------------------------
+
+    def known_links(self, since: date | None = None) -> set[str]:
+        """Что уже присылали в ленте.
+
+        Память полная, а не скользящая, как у Mobbin: там окно в сто
+        значений диктовал предел API, здесь ограничения нет, а строка
+        занимает полсотни байт. `since` нужен, только если захочется
+        показывать хорошее повторно через полгода.
+        """
+        query = "SELECT link_key FROM links"
+        args: tuple[str, ...] = ()
+        if since is not None:
+            query += " WHERE sent_on >= ?"
+            args = (since.isoformat(),)
+        with closing(self._connect()) as conn:
+            return {row["link_key"] for row in conn.execute(query, args).fetchall()}
+
+    def mark_links(self, finds: Sequence[SentLink], day: date) -> int:
+        """Запомнить отправленное. Возвращает число новых записей — по нему
+        видно, что источник встал: находок десять, новых ноль."""
+        if not finds:
+            return 0
+        with closing(self._connect()) as conn:
+            before = conn.execute("SELECT COUNT(*) AS n FROM links").fetchone()["n"]
+            conn.executemany(
+                "INSERT OR IGNORE INTO links(link_key, source, url, title, sent_on) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(f.link_key, f.source, f.url, f.title, day.isoformat()) for f in finds],
+            )
+            conn.commit()
+            after = conn.execute("SELECT COUNT(*) AS n FROM links").fetchone()["n"]
+        return int(after) - int(before)
+
+    def feed_sent_today(self, day: date) -> bool:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM feed_runs WHERE day = ? AND ok = 1 LIMIT 1", (day.isoformat(),)
+            ).fetchone()
+        return row is not None
+
+    def start_feed_run(self, day: date) -> int:
+        with closing(self._connect()) as conn:
+            cur = conn.execute(
+                "INSERT INTO feed_runs(day, started_at) VALUES (?, ?)",
+                (day.isoformat(), datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def finish_feed_run(
+        self, run_id: int, *, ok: bool, finds: int = 0, error: str = ""
+    ) -> None:
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "UPDATE feed_runs SET ok = ?, finds = ?, error = ? WHERE id = ?",
+                (1 if ok else 0, finds, error[:2000], run_id),
+            )
+            conn.commit()

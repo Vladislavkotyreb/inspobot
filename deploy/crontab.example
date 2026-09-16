@@ -10,3 +10,10 @@
 # Повторный запуск в тот же день ничего не отправит (защита в базе),
 # поэтому подстраховочную строку добавлять безопасно:
   0  14  *   *   *   cd /home/USER/inspobot && .venv/bin/python -m inspobot.daily >> var/cron.log 2>&1
+
+# Вариант 3: лента из открытых источников (Mobbin, CSS Design Awards, студии,
+# Behance, Dribbble, DProfile, Made on Tilda, Snapensnap). Ключ Anthropic ей
+# не нужен — прогон стоит трафик, поэтому подстраховка тут дешевле некуда.
+# За два часа до подборки: два письма в одну минуту читаются как одно.
+  0   9  *   *   *   cd /home/USER/inspobot && .venv/bin/python -m inspobot.feed >> var/cron.log 2>&1
+  0  13  *   *   *   cd /home/USER/inspobot && .venv/bin/python -m inspobot.feed >> var/cron.log 2>&1

@@ -1,0 +1,33 @@
+# Дизайн-студии и агентства для раздела «Кейсы студий».
+#
+# Формат строки:
+#     Название | адрес страницы со списком работ | регулярка ссылки кейса | сколько брать
+#
+# Последнее поле необязательно, по умолчанию 1 — одна работа со студии.
+# Так и задумано: раздел на четыре места, и без ограничения одна студия с
+# длинной страницей вытеснила бы все остальные.
+#
+# Регулярка примеряется к уже достроенному абсолютному адресу, поэтому
+# писать `studio\.ru/works/` достаточно — и для `/works/x`, и для полного
+# `https://studio.ru/works/x`.
+#
+# Этот файл — стартовый набор. Свой список кладите в var/studios.txt: он
+# читается первым и заменяет этот целиком. Проверить, что строки разобрались
+# и адреса живые:
+#
+#     python -m inspobot.feed --list
+#     python -m inspobot.feed --probe --only studios
+#
+# Порядок внутри раздела каждый день сдвигается на один — иначе первые
+# четыре студии занимали бы раздел вечно.
+
+Студия Артемия Лебедева | https://www.artlebedev.ru/everything/ | artlebedev\.ru/[^/"'?#]+/[^/"'?#]+/$
+AIC                     | https://aic.ru/works                  | aic\.ru/works/[^"'?#]+
+Red Collar              | https://redcollar.ru/works/           | redcollar\.ru/works/[^"'?#]+
+Ony                     | https://ony.ru/projects/              | ony\.ru/projects/[^"'?#]+
+Agima                   | https://www.agima.ru/cases/           | agima\.ru/cases/[^"'?#]+
+Work & Co               | https://work.co/work/                 | work\.co/work/[^"'?#]+
+MetaLab                 | https://www.metalab.com/work          | metalab\.com/work/[^"'?#]+
+Locomotive              | https://locomotive.ca/en/work         | locomotive\.ca/[a-z]{2}/work/[^"'?#]+
+Active Theory           | https://activetheory.net/work         | activetheory\.net/work/[^"'?#]+
+Basic                   | https://basicagency.com/work          | basicagency\.com/work/[^"'?#]+

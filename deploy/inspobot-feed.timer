@@ -1,0 +1,16 @@
+[Unit]
+Description=Запускать ленту каждый день в 09:00 по Москве
+
+[Timer]
+# На два часа раньше подборки из Mobbin: два письма подряд в одну минуту
+# читаются как одно длинное, и второе пролистывают.
+#
+# Пояс в строке OnCalendar понимает systemd 252 и новее. На старых версиях
+# уберите «Europe/Moscow» и приведите системное время сервера к нужному поясу
+# (timedatectl set-timezone Europe/Moscow) — иначе таймер сработает по UTC.
+OnCalendar=*-*-* 09:00:00 Europe/Moscow
+Persistent=true
+Unit=inspobot-feed.service
+
+[Install]
+WantedBy=timers.target
