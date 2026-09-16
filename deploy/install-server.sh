@@ -63,13 +63,23 @@ if ! .venv/bin/python -m inspobot.doctor; then
 fi
 
 # 5. Расписание
-HOUR=$(sed -n 's/^INSPOBOT_HOUR=\([0-9][0-9]*\).*/\1/p' .env | tail -1)
-HOUR="${HOUR:-11}"
-MINUTE=$(sed -n 's/^INSPOBOT_MINUTE=\([0-9][0-9]*\).*/\1/p' .env | tail -1)
-MINUTE="${MINUTE:-0}"
-WANT_TZ=$(sed -n 's/^INSPOBOT_TZ=\(.*\)/\1/p' .env | tail -1)
-WANT_TZ="${WANT_TZ:-Europe/Moscow}"
-LINE="$MINUTE $HOUR * * * cd $DIR && .venv/bin/python -m inspobot.daily >> var/cron.log 2>&1"
+read_env() {
+    VALUE=$(sed -n "s/^$1=//p" .env | tail -1)
+    # Хвостовой комментарий и кавычки: «INSPOBOT_HOUR=11  # утро» иначе
+    # становится часом «11  # утро» и ломает строку crontab целиком.
+    VALUE=${VALUE%%#*}
+    VALUE=$(printf '%s\n' "$VALUE" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^["'"'"']//; s/["'"'"']$//')
+    echo "${VALUE:-$2}"
+}
+
+HOUR=$(read_env INSPOBOT_HOUR 11)
+MINUTE=$(read_env INSPOBOT_MINUTE 0)
+FEED_HOUR=$(read_env INSPOBOT_FEED_HOUR 9)
+FEED_MINUTE=$(read_env INSPOBOT_FEED_MINUTE 0)
+WANT_TZ=$(read_env INSPOBOT_TZ Europe/Moscow)
+
+DAILY_LINE="$MINUTE $HOUR * * * cd $DIR && .venv/bin/python -m inspobot.daily >> var/cron.log 2>&1"
+FEED_LINE="$FEED_MINUTE $FEED_HOUR * * * cd $DIR && .venv/bin/python -m inspobot.feed >> var/cron.log 2>&1"
 
 # Cron живёт по времени сервера и ничего не знает про пояса. Если пояс
 # сервера не тот, в котором вы ждёте письмо, строка «0 11» отработает не в
@@ -79,7 +89,7 @@ LINE="$MINUTE $HOUR * * * cd $DIR && .venv/bin/python -m inspobot.daily >> var/c
 SERVER_TZ=$(timedatectl show --property=Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || echo "")
 echo
 if [ -n "$SERVER_TZ" ] && [ "$SERVER_TZ" != "$WANT_TZ" ]; then
-    echo "ВНИМАНИЕ: пояс сервера — $SERVER_TZ, а письмо ждём по $WANT_TZ."
+    echo "ВНИМАНИЕ: пояс сервера — $SERVER_TZ, а письма ждём по $WANT_TZ."
     echo "Cron про пояса не знает, поэтому приведите время сервера к нужному:"
     echo
     echo "    sudo timedatectl set-timezone $WANT_TZ"
@@ -91,30 +101,72 @@ else
     TZ_MISMATCH=0
 fi
 
+# Лента ходит по своим адресам, и ни один из них не совпадает с адресами
+# подборки. Сказать про это здесь дешевле, чем утром разбираться, почему
+# письмо пустое.
+echo
+echo "=== источники ленты ==="
+.venv/bin/python -m inspobot.feed --list 2>&1 | sed -n '1,4p'
+echo "Полная проверка (ходит в сеть): .venv/bin/python -m inspobot.feed --probe"
+
+add_cron() {
+    # $1 — строка, $2 — по чему искать уже стоящую
+    if crontab -l 2>/dev/null | grep -q "$2"; then
+        echo "  уже есть: $2"
+        return 0
+    fi
+    (crontab -l 2>/dev/null; echo "$1") | crontab - 2>/dev/null || true
+    # Проверяем, а не верим на слово. `crontab -` умеет завершиться нулём и
+    # ничего не записать — например, пока каталог спула ещё не создан после
+    # свежей установки пакета cron. Рапорт «добавлено» там, где ничего не
+    # добавилось, означает молчащего бота и неделю поисков причины.
+    if crontab -l 2>/dev/null | grep -q "$2"; then
+        echo "  добавлено: $1"
+    else
+        echo "  НЕ ЗАПИСАЛОСЬ: $2" >&2
+        echo "  Добавьте руками через crontab -e:" >&2
+        echo "    $1" >&2
+        CRON_FAILED=1
+    fi
+}
+
 echo
 if [ "$1" = "--cron" ]; then
     if [ "$TZ_MISMATCH" = "1" ]; then
-        echo "Расписание не ставлю, пока пояса не сойдутся — иначе письмо придёт не вовремя."
-        echo "Строка, которая нужна после смены пояса:"
-        echo "    $LINE"
+        echo "Расписание не ставлю, пока пояса не сойдутся — иначе письма придут не вовремя."
+        echo "Строки, которые нужны после смены пояса:"
+        echo "    $DAILY_LINE"
+        echo "    $FEED_LINE"
         exit 0
     fi
-    if crontab -l 2>/dev/null | grep -q "inspobot.daily"; then
-        echo "Строка про inspobot уже есть в crontab — не трогаю."
+    echo "=== расписание ==="
+    CRON_FAILED=0
+    if ! command -v crontab >/dev/null 2>&1; then
+        echo "  crontab не установлен: sudo apt install cron" >&2
+        echo "  Нужные строки:" >&2
+        echo "    $DAILY_LINE" >&2
+        echo "    $FEED_LINE" >&2
+        CRON_FAILED=1
     else
-        (crontab -l 2>/dev/null; echo "$LINE") | crontab -
-        echo "Добавлено в crontab:"
-        echo "    $LINE"
+        add_cron "$DAILY_LINE" "inspobot.daily"
+        add_cron "$FEED_LINE" "inspobot.feed"
     fi
     echo
     echo "Проверить: crontab -l"
     echo "Лог запусков: $DIR/var/cron.log"
+    if [ "$CRON_FAILED" = "1" ]; then
+        echo
+        echo "Расписание встало не полностью — см. строки выше." >&2
+    fi
     # Служба кнопок: сервер работает круглосуточно, поэтому нажатия
     # принимает он сам — внешний ретранслятор не нужен.
-    if command -v systemctl >/dev/null 2>&1; then
+    # Наличия команды мало: в контейнере без systemd как init она есть, но
+    # падает на «Failed to connect to bus», и под set -e это обрывает всю
+    # установку — уже на готовом расписании, что выглядит как полный провал.
+    if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
         sed "s|/root/inspobot|$DIR|g" deploy/inspobot-listener.service \
             > /etc/systemd/system/inspobot-listener.service
-        systemctl daemon-reload
+        systemctl daemon-reload || true
         systemctl enable --now inspobot-listener >/dev/null 2>&1 || true
         echo
         echo "Служба кнопок: $(systemctl is-active inspobot-listener 2>/dev/null || echo нет)"
@@ -129,7 +181,8 @@ if [ "$1" = "--cron" ]; then
 else
     echo "Готово. Осталось расписание:"
     echo
-    echo "    $LINE"
+    echo "    $DAILY_LINE"
+    echo "    $FEED_LINE"
     echo
     echo "Добавить самому: crontab -e. Или запустить: sh deploy/install-server.sh --cron"
 fi

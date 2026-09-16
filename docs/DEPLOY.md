@@ -4,6 +4,47 @@
 `api.mobbin.com` и `api.telegram.org`. Больше ничего: ни базы, ни веб-сервера —
 состояние лежит в файле SQLite.
 
+Писем у бота два, и требования у них разные:
+
+| Письмо | Чем запускается | Что нужно |
+|---|---|---|
+| Утренняя подборка из Mobbin | `inspobot.daily` | ключ Anthropic, токен Mobbin, Telegram |
+| Лента из открытых источников | `inspobot.feed` | Telegram; токен Mobbin — только для его раздела |
+
+Ленте **ключ Anthropic не нужен вовсе**, поэтому она поднимется даже там, где
+`api.anthropic.com` недоступен. См. [SOURCES.md](SOURCES.md).
+
+## Чистая Ubuntu: одной командой
+
+Если сервер только что переустановлен, всё делает один скрипт — системные
+пакеты, часовой пояс, код, окружение:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Vladislavkotyreb/inspobot/claude/inspobot-mobbin-msp-v2p3u1/deploy/ubuntu-setup.sh | sh
+```
+
+Он остановится и попросит заполнить `.env` — это нормально, так и задумано.
+Заполняете (шаг 2 ниже), переносите токен Mobbin и базу, и запускаете второй
+раз, теперь уже с расписанием:
+
+```bash
+cd /opt/inspobot && sh deploy/install-server.sh --cron
+```
+
+Каталог по умолчанию `/opt/inspobot`, другой — первым аргументом:
+`sh ubuntu-setup.sh /home/user/inspobot`. Повторный запуск безопасен: пакеты
+уже стоят, репозиторий обновляется, `.env` не трогается.
+
+Что скрипт делает с системой, кроме установки пакетов: **меняет часовой пояс
+на `Europe/Moscow`**. Это не косметика — cron работает по времени сервера и
+про пояса не знает, а у большинства провайдеров сервер живёт в UTC, и строка
+«0 11» отработала бы в 14:00 по Москве. Другой пояс — `INSPOBOT_TZ=... sh
+ubuntu-setup.sh`.
+
+Проверено прогоном на Ubuntu 24.04 под root: пакеты, пояс, клон, venv,
+зависимости, обе строки расписания и повторный запуск. Не проверено на живом
+сервере то, что требует сети до Telegram и Mobbin, — шаг проверки доступов.
+
 ## 0. Разведка: годится ли сервер
 
 Прежде чем что-то ставить, проверьте сервер одним скриптом. Он смотрит версию
@@ -29,21 +70,32 @@ api.telegram.org       доступен (404)
 поправьте адрес.)
 
 Коды `401` и `404` здесь — хороший знак: до хоста дошли, просто без ключа.
-**`НЕДОСТУПЕН` у `api.anthropic.com` означает, что дальше идти незачем** —
-бот на этом сервере работать не будет, сколько его ни настраивай. Это самая
-частая история с российскими хостингами; решается сменой площадки или
-маршрута, но не настройками бота.
+**`НЕДОСТУПЕН` у `api.anthropic.com` означает, что утренней подборки на этом
+сервере не будет**, сколько её ни настраивай. Это самая частая история с
+российскими хостингами; решается сменой площадки или маршрута, но не
+настройками бота. А вот лента там поднимется: ей нужен только Telegram.
+
+Во втором списке (адреса ленты) недоступный хост — не приговор вообще:
+этот раздел просто промолчит, остальные придут. Что именно отвечает —
+покажет `.venv/bin/python -m inspobot.feed --probe`.
 
 `crontab: НЕТ` — не приговор: расписание можно повесить на systemd-таймер
 или на планировщик в панели хостинга.
 
 ## 1. Установка
 
+На чистой Ubuntu проще одной командой выше. Вручную:
+
 ```bash
-git clone https://github.com/Vladislavkotyreb/inspobot ~/inspobot
+sudo apt install -y python3 python3-venv python3-pip git curl
+git clone -b claude/inspobot-mobbin-msp-v2p3u1 \
+    https://github.com/Vladislavkotyreb/inspobot ~/inspobot
 cd ~/inspobot
 sh deploy/install-server.sh
 ```
+
+`python3-venv` на Debian и Ubuntu идёт отдельным пакетом: без него
+`python3 -m venv` падает с советом поставить пакет, которого нет.
 
 Скрипт найдёт подходящий Python, соберёт окружение, поставит зависимости и
 создаст `.env` из шаблона — после чего остановится и попросит его заполнить.
@@ -140,6 +192,20 @@ cd ~/inspobot && sh deploy/install-server.sh --cron
 `--force` нужен потому, что вторая подборка за день не отправляется: защита от
 двойного срабатывания cron.
 
+И лента — у неё своя проверка, которая показывает каждый источник построчно:
+
+```bash
+.venv/bin/python -m inspobot.feed --list    # состав, без единого запроса
+.venv/bin/python -m inspobot.feed --probe   # что отвечает каждый источник
+.venv/bin/python -m inspobot.feed --dry-run # собрать и показать, не отправляя
+.venv/bin/python -m inspobot.feed --force   # реальная отправка
+```
+
+`--probe` возвращает код 1, если лента вышла пустой. Адреса и регулярки
+источников писались без возможности проверить их живьём, поэтому **первый
+`--probe` на сервере — обязательный шаг**: он покажет, какие источники
+угаданы верно, а какие надо поправить в `var/sources.json`.
+
 ## 4. Расписание: два способа
 
 ### Часовой пояс — сначала он
@@ -173,9 +239,10 @@ date    # проверить
 
 ```bash
 sudo cp deploy/inspobot-daily.service deploy/inspobot-daily.timer /etc/systemd/system/
+sudo cp deploy/inspobot-feed.service deploy/inspobot-feed.timer /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now inspobot-daily.timer
-systemctl list-timers inspobot-daily
+sudo systemctl enable --now inspobot-daily.timer inspobot-feed.timer
+systemctl list-timers 'inspobot-*'
 ```
 
 Пояс задан прямо в таймере, системное время сервера трогать не нужно
@@ -205,8 +272,11 @@ cron на macOS для этого не годится: если ноутбук �
 /opt/inspobot/.env                    секреты, права 600
 /opt/inspobot/var/mobbin_token.json   токены Mobbin, права 600
 /opt/inspobot/var/profile.json        состав дайджеста
-/opt/inspobot/var/inspobot.sqlite3    что уже присылали
+/opt/inspobot/var/inspobot.sqlite3    что присылали — и подборка, и лента
 /opt/inspobot/var/cron.log            лог, если запускаете через cron
+/opt/inspobot/var/sources.json        правки источников ленты (необязательно)
+/opt/inspobot/var/studios.txt         свой список студий (необязательно)
+/opt/inspobot/config/studios.txt      стартовый список студий, в git
 ```
 
 Каталог `var/` в git не попадает. Бэкапить осмысленно только его.
@@ -222,6 +292,9 @@ cd /opt/inspobot && git pull && .venv/bin/pip install -r requirements.txt
 | Симптом | Куда смотреть |
 |---|---|
 | Утром ничего не пришло | `inspobot.doctor`, затем `var/cron.log` или `journalctl -u inspobot-daily` |
+| Лента пришла без какого-то раздела | `inspobot.feed --probe --only КЛЮЧ` — скажет, что ответил источник |
+| Лента не пришла совсем | `inspobot.feed --probe`; код 1 означает, что не ответил никто |
+| Раздел Mobbin в ленте пустой | токен: `--probe --only mobbin` назовёт причину |
 | «Нет файла с токенами Mobbin» | [MOBBIN_AUTH.md](MOBBIN_AUTH.md) |
 | Нужен совсем подробный лог | `--verbose` безопасен. А вот `ANTHROPIC_LOG=debug` печатает тело запроса вместе с токеном Mobbin — такой лог никому не пересылайте |
 | Пришёл текст без картинок | Telegram не смог забрать превью; ссылки на Mobbin в сообщениях остаются рабочими |

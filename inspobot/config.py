@@ -72,6 +72,8 @@ class Config:
     timezone: str
     hour: int
     minute: int
+    feed_hour: int
+    feed_minute: int
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -116,6 +118,10 @@ class Config:
             timezone=os.environ.get("INSPOBOT_TZ", "Europe/Moscow").strip(),
             hour=_int("INSPOBOT_HOUR", 11),
             minute=_int("INSPOBOT_MINUTE", 0),
+            # Лента уходит раньше подборки: два письма в одну минуту
+            # читаются как одно длинное, и второе пролистывают.
+            feed_hour=_int("INSPOBOT_FEED_HOUR", 9),
+            feed_minute=_int("INSPOBOT_FEED_MINUTE", 0),
         )
 
     def require(self, *names: str) -> None:

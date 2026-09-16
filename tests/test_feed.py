@@ -48,7 +48,7 @@ def a_config(tmp: Path, **changes) -> Config:
         server_fallbacks=False, mobbin_mcp_url="", mobbin_token_file=tmp / "tok.json",
         mobbin_access_token="", db_path=tmp / "db.sqlite3", profile_path=tmp / "p.json",
         chats_path=tmp / "chats.txt", image_mode="document", top_buttons=False,
-        timezone="Europe/Moscow", hour=11, minute=0,
+        timezone="Europe/Moscow", hour=11, minute=0, feed_hour=9, feed_minute=0,
         sources_path=tmp / "sources.json", studios_path=tmp / "studios.txt",
         feed_image_mode="photo", feed_shots=True, feed_shot_url="", feed_robots=True,
     )

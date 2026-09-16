@@ -44,10 +44,24 @@ check_host() {
     esac
 }
 if command -v curl >/dev/null 2>&1; then
+    echo "-- нужны утренней подборке (inspobot.daily) --"
     check_host "https://api.anthropic.com/v1/models" "api.anthropic.com"
     check_host "https://api.mobbin.com/mcp" "api.mobbin.com"
     check_host "https://api.telegram.org/bot0:0/getMe" "api.telegram.org"
     check_host "https://github.com" "github.com"
+
+    # Лента (inspobot.feed) ходит по своим адресам и ключа Anthropic не
+    # требует. Недоступный источник здесь не приговор: раздел просто
+    # промолчит, остальные придут. Поэтому список отдельный.
+    echo
+    echo "-- нужны ленте (inspobot.feed); недоступный = раздел промолчит --"
+    check_host "https://www.cssdesignawards.com/" "cssdesignawards.com"
+    check_host "https://www.behance.net/" "behance.net"
+    check_host "https://dribbble.com/" "dribbble.com"
+    check_host "https://dprofile.ru/" "dprofile.ru"
+    check_host "https://tilda.cc/" "tilda.cc"
+    check_host "https://snapensnap.com/" "snapensnap.com"
+    check_host "https://s.wordpress.com/mshots/v1/https%3A%2F%2Fexample.com" "s.wordpress.com"
 else
     echo "curl не установлен — поставьте его, он нужен и для проверки, и для установки"
 fi
